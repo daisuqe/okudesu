@@ -946,6 +946,7 @@ const Stars = (() => {
 // Ranking
 // ============================================================
 const RANK_KEY = 'OKUDESU_Ranking_Score_', RANK_N = 10;
+const MUTE_KEY = 'OKUDESU_Muted';
 function loadRanking() {
   const r = [];
   for (let i = 0; i < RANK_N; i++) {
@@ -1013,6 +1014,8 @@ const Game = {
 
   init() {
     this.rebuildRanking();
+    try { this.muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
+    Synth.setMute(this.muted);
   },
 
   startGame() {
@@ -1243,6 +1246,7 @@ const Game = {
   toggleSound() {
     this.muted = !this.muted;
     Synth.setMute(this.muted);
+    try { localStorage.setItem(MUTE_KEY, this.muted ? '1' : '0'); } catch (e) {}
     if (this.paused) this.updatePauseMenu();
   },
 
