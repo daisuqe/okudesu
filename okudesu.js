@@ -238,46 +238,36 @@ class WireText {
 // ============================================================
 // Audio (CyberSynthManager)
 // ============================================================
-const CLIPS = ['bgm_slow', 'bgm_gameover', 'sfx_clear_1', 'sfx_clear_2', 'sfx_clear_3', 'sfx_clear_4',
-  'sfx_lock', 'sfx_move', 'sfx_rotate', 'sfx_swap', 'sfx_fall'];
-
+// All clips are synthesized in-browser (okudesu_audio.js); no audio files are loaded.
 class SoundSystem {
-  constructor() { this.mode = null; this.buffers = {}; this.html = {}; this.muted = false; }
+  constructor() { this.mode = null; this.buffers = {}; this.muted = false; }
   init() {
     if (this.mode) { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC && location.protocol !== 'file:') {
-      this.mode = 'wa';
-      this.ctx = new AC();
-      this.out = this.ctx.createGain();
-      this.out.connect(this.ctx.destination);
-      for (const n of CLIPS) {
-        fetch('audio/' + n + '.wav').then(r => r.arrayBuffer())
-          .then(b => new Promise((ok, ng) => this.ctx.decodeAudioData(b, ok, ng)))
-          .then(buf => { this.buffers[n] = buf; })
-          .catch(() => {});
-      }
-    } else {
-      // file:// fallback: HTMLAudioElement
-      this.mode = 'html';
-      for (const n of CLIPS) {
-        const a = new Audio('audio/' + n + '.wav');
-        a.preload = 'auto';
-        this.html[n] = a;
-      }
-    }
+    if (!AC || !window.OkudesuAudio) { this.mode = 'none'; return; }
+    this.mode = 'wa';
+    this.ctx = new AC();
+    this.out = this.ctx.createGain();
+    this.out.connect(this.ctx.destination);
+    // generate one clip per task so the first frames aren't blocked
+    const { SR, GENERATORS } = window.OkudesuAudio;
+    const names = Object.keys(GENERATORS);
+    const next = () => {
+      const n = names.shift(); if (!n) return;
+      const data = GENERATORS[n]();
+      const b = this.ctx.createBuffer(1, data.length, SR);
+      b.getChannelData(0).set(data);
+      this.buffers[n] = b;
+      setTimeout(next, 0);
+    };
+    next();
   }
   oneShot(name, vol) {
-    if (this.muted || !this.mode) return;
-    if (this.mode === 'wa') {
-      const b = this.buffers[name]; if (!b) return;
-      const src = this.ctx.createBufferSource(); src.buffer = b;
-      const g = this.ctx.createGain(); g.gain.value = vol;
-      src.connect(g); g.connect(this.out); src.start();
-    } else {
-      const a = this.html[name]; if (!a) return;
-      const c = a.cloneNode(); c.volume = clamp01(vol); c.play().catch(() => {});
-    }
+    if (this.muted || this.mode !== 'wa') return;
+    const b = this.buffers[name]; if (!b) return;
+    const src = this.ctx.createBufferSource(); src.buffer = b;
+    const g = this.ctx.createGain(); g.gain.value = vol;
+    src.connect(g); g.connect(this.out); src.start();
   }
 }
 
@@ -287,7 +277,6 @@ class LoopPlayer {
   stop() {
     this.playing = false; this.started = false;
     if (this.node) { try { this.node.stop(); } catch (e) {} this.node.disconnect(); this.node = null; }
-    if (this.el) { this.el.pause(); this.el = null; }
   }
   update() {
     if (!this.playing) return;
@@ -298,17 +287,11 @@ class LoopPlayer {
         this.gain = s.ctx.createGain(); this.gain.connect(s.out);
         this.node = s.ctx.createBufferSource(); this.node.buffer = b; this.node.loop = true;
         this.node.connect(this.gain); this.node.start();
-      } else if (s.mode === 'html') {
-        const src = s.html[this.clip]; if (!src) return;
-        this.el = src.cloneNode(); this.el.loop = true;
-        this.el.preservesPitch = this.el.mozPreservesPitch = this.el.webkitPreservesPitch = false;
-        this.el.play().catch(() => {});
       } else return;
       this.started = true;
     }
     const v = s.muted ? 0 : this.vol;
     if (this.node) { this.gain.gain.value = v; this.node.playbackRate.value = this.rate; }
-    if (this.el) { this.el.volume = clamp01(v); this.el.playbackRate = this.rate; }
   }
 }
 
@@ -319,7 +302,7 @@ const Synth = {
   isPlayingBGM: false,
   isFastDropping: false,
   fade: null,
-  init() { this.bgm = new LoopPlayer(this.snd); this.fall = new LoopPlayer(this.snd); },
+  init() { this.bgm = new LoopPlayer(this.snd); },
   unlock() { this.snd.init(); this.playBGM(); },
   setMute(m) { this.snd.muted = m; },
   playBGM() { this.isPlayingBGM = true; this.updateBGMClip(true); },
@@ -342,25 +325,21 @@ const Synth = {
     this.isPlayingBGM = false;
   },
   clear(n) { this.snd.oneShot(n >= 4 ? 'sfx_clear_4' : n === 3 ? 'sfx_clear_3' : n === 2 ? 'sfx_clear_2' : 'sfx_clear_1', this.master); },
-  lock() { this.snd.oneShot('sfx_lock', this.master * 1.1); },
+  lock() { this.snd.oneShot('sfx_lock', this.master * 1.0); },
   move() { this.snd.oneShot('sfx_move', this.master); },
   rotate() { this.snd.oneShot('sfx_rotate', this.master * 0.3); },
-  setFastDropping(b) { this.isFastDropping = b; },
+  setFastDropping(b) {
+    // one-shot whoosh when fast drop starts (no loop)
+    if (b && !this.isFastDropping && this.isPlayingBGM) this.snd.oneShot('sfx_fall', this.master * 0.45);
+    this.isFastDropping = b;
+  },
   update(dt) {
     if (this.fade) {
       this.fade.t += dt;
       this.bgm.vol = lerp(this.fade.from, this.fade.to, clamp01(this.fade.t / this.fade.dur));
       if (this.fade.t >= this.fade.dur) this.fade = null;
     }
-    let target = 0;
-    if (this.isFastDropping && !this.snd.muted && this.isPlayingBGM) {
-      if (!this.fall.playing) { this.fall.play('sfx_fall'); this.fall.vol = 0; }
-      target = this.master * 0.45;
-    }
-    const d = dt * 6.0;
-    this.fall.vol = Math.abs(target - this.fall.vol) <= d ? target : this.fall.vol + Math.sign(target - this.fall.vol) * d;
-    if (this.fall.vol <= 0.001 && this.fall.playing) this.fall.stop();
-    this.bgm.update(); this.fall.update();
+    this.bgm.update();
   },
 };
 Synth.init();
