@@ -145,9 +145,18 @@ window.OkudesuAudio = (() => {
   function buf(dur) { return new Float32Array(Math.floor(dur * SR)); }
   const envDecay = (t, total, a = 0.003) => t < a ? t / a : Math.max(0, 1 - (t - a) / (total - a));
 
+  // Move: short cursor-like "ko" (quick pitch drop, no lingering ring)
   function sfxMove() {
-    const o = buf(0.08);
-    for (let i = 0; i < o.length; i++) { const t = i / SR; o[i] = Math.sin(TAU * 320 * t) * Math.exp(-t * 45) * 0.95; }
+    const o = buf(0.03);
+    let ph = 0;
+    for (let i = 0; i < o.length; i++) {
+      const t = i / SR;
+      const f = 300 + 135 * Math.exp(-t * 250);        // 435Hz -> 300Hz
+      ph += TAU * f / SR;
+      o[i] = Math.sin(ph) * Math.min(1, t / 0.0008) * Math.exp(-t * 140) * 0.95;
+    }
+    const fl = Math.floor(0.004 * SR);
+    for (let i = 0; i < fl; i++) o[o.length - 1 - i] *= i / fl;
     return o;
   }
   function sfxRotate() {
