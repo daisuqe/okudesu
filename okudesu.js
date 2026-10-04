@@ -326,7 +326,7 @@ const Synth = {
   },
   clear(n) { this.snd.oneShot(n >= 4 ? 'sfx_clear_4' : n === 3 ? 'sfx_clear_3' : n === 2 ? 'sfx_clear_2' : 'sfx_clear_1', this.master); },
   lock() { this.snd.oneShot('sfx_lock', this.master * 1.0); },
-  move() { this.snd.oneShot('sfx_move', this.master); },
+  move() { this.snd.oneShot('sfx_move', this.master * 0.3); },
   rotate() { this.snd.oneShot('sfx_rotate', this.master * 0.3); },
   setFastDropping(b) {
     // one-shot whoosh when fast drop starts (no loop)
