@@ -151,7 +151,7 @@ window.OkudesuAudio = (() => {
     let ph = 0;
     for (let i = 0; i < o.length; i++) {
       const t = i / SR;
-      const f = 300 + 135 * Math.exp(-t * 250);        // 435Hz -> 300Hz
+      const f = 400 + 180 * Math.exp(-t * 250);        // 580Hz -> 400Hz
       ph += TAU * f / SR;
       o[i] = Math.sin(ph) * Math.min(1, t / 0.0008) * Math.exp(-t * 140) * 0.95;
     }
