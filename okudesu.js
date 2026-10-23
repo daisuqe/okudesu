@@ -355,6 +355,7 @@ const Input = {
   init(el) {
     const keyName = e => (e.key === '+' ? 'Plus' : e.code);
     window.addEventListener('keydown', e => {
+      if (AppNav.handleKey(e)) return;
       Synth.snd.init();
       const k = keyName(e);
       if (['Tab', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -363,6 +364,7 @@ const Input = {
       if (e.code === 'NumpadAdd' && k !== 'NumpadAdd') { this.down.add('NumpadAdd'); this.held.add('NumpadAdd'); }
     });
     window.addEventListener('keyup', e => {
+      if (AppNav.open) return;
       const k = keyName(e);
       this.held.delete(k); this.up.add(k);
       this.held.delete(e.code); this.up.add(e.code);
@@ -1458,6 +1460,100 @@ function drawTouchControls(ctx) {
 }
 
 // ============================================================
+// App list button (title screen, top-right) + confirm dialog
+// ==============================================================
+const APPS_ICON = [
+  '......###...###.',
+  '.....#...#.#...#',
+  '.....#...#.#...#',
+  '.....#..#..#..#.',
+  '.....#..#..#..#.',
+  '....##..####..#.',
+  '..##.......#..#.',
+  '.#............#.',
+  '#.............#.',
+  '#..............#',
+  '############...#',
+  '............#..#',
+  '.###########...#',
+  '.#............#.',
+  '..##........##..',
+  '....########....'
+];
+const APPS_URL = 'https://daisuqe.github.io/';
+const AppNav = {
+  open: false, neutral: true,
+  init() {
+    this.screen = document.getElementById('startScreen');
+    this.btn = document.getElementById('appsBtn');
+    this.modal = document.getElementById('appsModal');
+    this.yes = document.getElementById('appsYes');
+    this.no = document.getElementById('appsNo');
+    // icon drawn from text data in the UI green
+    const ctx = document.getElementById('appsIcon').getContext('2d');
+    ctx.fillStyle = css(GREEN);
+    APPS_ICON.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === '#') ctx.fillRect(x, y, 1, 1); });
+    // ?lang=ja / ?lang=en overrides the browser language (for checking)
+    const lang = new URLSearchParams(location.search).get('lang') || navigator.language || '';
+    const ja = /^ja\b/i.test(lang);
+    document.getElementById('appsMsg').textContent = ja
+      ? 'アプリ一覧に移動します。\nこのゲームを離れますがよろしいですか？'
+      : 'This will take you to the app list.\nDo you want to leave this game?';
+    this.btn.addEventListener('click', () => this.show());
+    this.yes.addEventListener('click', () => { location.href = APPS_URL; });
+    this.no.addEventListener('click', () => this.hide());
+    this.modal.addEventListener('pointerdown', e => { if (e.target === this.modal) { e.preventDefault(); this.hide(); } });
+    this.modal.addEventListener('mousedown', e => { if (e.target === this.modal) e.preventDefault(); });
+    for (const b of [this.yes, this.no]) {
+      b.addEventListener('focus', () => { this.yes.classList.toggle('sel', b === this.yes); this.no.classList.toggle('sel', b === this.no); });
+    }
+  },
+  show() {
+    this.open = true;
+    this.neutral = false;
+    Input.held.clear();
+    this.modal.hidden = false;
+    this.no.focus();
+  },
+  hide() {
+    this.open = false;
+    this.modal.hidden = true;
+    this.btn.focus();
+  },
+  toggleSel() { (document.activeElement === this.yes ? this.no : this.yes).focus(); },
+  // keyboard: returns true when the key must not reach the game
+  handleKey(e) {
+    if (this.open) {
+      const c = e.code;
+      if (c === 'Escape') { e.preventDefault(); this.hide(); }
+      else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'KeyA', 'KeyD', 'KeyW', 'KeyS'].includes(c)) { e.preventDefault(); this.toggleSel(); }
+      else if (c === 'Tab') { e.preventDefault(); this.toggleSel(); }
+      // Enter / Space fall through to the focused button's native activation
+      return true;
+    }
+    if (document.activeElement === this.btn && ['Enter', 'NumpadEnter', 'Space'].includes(e.code)) return true;
+    return false;
+  },
+  // gamepad, same scheme as the game's menus (up/down or left/right moves, A = decide, B = No)
+  pollPad() {
+    if (Input.kd('J12', 'J13', 'J14', 'J15')) this.toggleSel();
+    const x = Input.axis(0), y = Input.axis(1);
+    const m = Math.max(Math.abs(x), Math.abs(y));
+    if (m < 0.2) this.neutral = true;
+    else if (m > 0.6 && this.neutral) { this.neutral = false; this.toggleSel(); }
+    if (Input.kd('J0')) document.activeElement === this.yes ? this.yes.click() : this.hide();
+    else if (Input.kd('J1')) this.hide();
+  },
+  update() {
+    const hide = Game.started;
+    if (this.screen.hidden !== hide) {
+      if (hide && document.activeElement === this.btn) hudCanvas.focus();
+      this.screen.hidden = hide;
+    }
+  },
+};
+
+// ============================================================
 // Resize / main loop
 // ============================================================
 function resize() {
@@ -1473,6 +1569,7 @@ function resize() {
 window.addEventListener('resize', resize);
 
 Input.init(hudCanvas);
+AppNav.init();
 resize();
 Game.init();
 hudCanvas.focus();
@@ -1486,8 +1583,12 @@ function frame(now) {
   const sdt = Game.paused ? 0 : dt;   // Time.timeScale
   Game.time += sdt;
 
-  Game.update(sdt);
-  if (Game.active && !Game.paused && !Game.over && Game.started) Game.active.update(sdt);
+  if (AppNav.open) AppNav.pollPad();
+  else {
+    Game.update(sdt);
+    if (Game.active && !Game.paused && !Game.over && Game.started) Game.active.update(sdt);
+  }
+  AppNav.update();
   Sched.update(sdt);
 
   for (const u of [...animUnits]) u.animate(sdt);
