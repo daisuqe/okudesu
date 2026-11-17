@@ -198,7 +198,10 @@ class WireText {
     if (!this.active || !this.text) return;
     const uw = unscaledWidth(this.text);
     if (uw <= 0) return;
-    const s = Math.min(this.widthRatio * TW, W * 0.92) / uw;   // pixels per font unit (TW: text width basis, larger in portrait); never wider than the screen
+    // pixels per font unit. Size follows the stage (TW); it only shrinks when the text would not fit:
+    // never wider than the screen, nor than maxW (ratio of W) when set. noCap: allowed to run off screen (scrolling banner)
+    const room = Math.min(W * 0.92, this.maxW ? this.maxW * W : Infinity);
+    const s = (this.noCap ? this.widthRatio * TW : Math.min(this.widthRatio * TW, room)) / uw;
     const spacing = CHAR_SPACING * 100 * s;
     let ax = this.pos[0] * W, ay = this.pos[1] * H, sx = 1;
     if (this.float && floatEnabled) {
@@ -210,7 +213,8 @@ class WireText {
     ctx.scale(sx, 1);
     ctx.strokeStyle = css(this.color);
     // letters scale with the width, so on tall (portrait) screens the line must not keep growing with the height
-    ctx.lineWidth = Math.max(0.75, this.lineWidth * LINE_PX * Math.min(H, TW * 0.75));
+    const shrink = s * uw / (this.widthRatio * TW);            // < 1 when the text was shrunk to fit
+    ctx.lineWidth = Math.max(0.75, this.lineWidth * LINE_PX * Math.min(H, TW * 0.75) * shrink);
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
     let x = this.autoCenter ? -(uw * s) / 2 : 0;
@@ -554,7 +558,9 @@ const hud = hudCanvas.getContext('2d');
 let W = window.innerWidth, H = window.innerHeight, DPR = Math.min(window.devicePixelRatio || 1, 2);
 // text width basis: letters are sized from this; on tall portrait screens they get up to 1.6x larger
 let TW = W;
-const textBasis = () => W * (H > W ? Math.min(1.6, Math.max(1, (H / W) * 0.75)) : 1);
+// The stage (3D field) is drawn with a fixed vertical view angle, so its on-screen size follows the screen height.
+// Text is sized from the same basis (as if the screen were 4:3), so it keeps its size relative to the stage on any screen.
+const textBasis = () => H * 4 / 3;
 
 const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
 renderer.setClearColor(new THREE.Color(0.02, 0.03, 0.07), 1);
@@ -1307,12 +1313,12 @@ const Game = {
   notify(text, color, dur) {
     this.mega = false;
     this.notifTimer = dur;
-    Object.assign(T.notif, { text, color, float: true, pos: [0.5, 0.65], lineWidth: 0.021 * 1.35, widthRatio: text.length * CHAR_W * 1.35, active: true });
+    Object.assign(T.notif, { text, color, float: true, pos: [0.5, 0.65], lineWidth: 0.021 * 1.35, widthRatio: text.length * CHAR_W * 1.35, active: true, noCap: false });
   },
-  megaWidth() { return 0.49 * (unscaledWidth(T.notif.text) / 80) / (W / H); },
+  megaWidth() { return 0.49 * (unscaledWidth(T.notif.text) / 80) / (TW / H); },
   startMega() {
     this.mega = true; this.megaTimer = MEGA_DUR;
-    Object.assign(T.notif, { text: 'OKUDESU!!!', color: C(1, 0.9, 0, 0.45), float: false, lineWidth: 0.021 * 1.35 * 6, active: true });
+    Object.assign(T.notif, { text: 'OKUDESU!!!', color: C(1, 0.9, 0, 0.45), float: false, lineWidth: 0.021 * 1.35 * 6, active: true, noCap: true });
     T.notif.widthRatio = this.megaWidth();
     T.notif.pos = [1 + T.notif.widthRatio / 2 - 0.05, 0.55];
   },
@@ -1585,7 +1591,7 @@ const Game = {
       this.megaTimer -= dt;
       if (this.megaTimer <= 0) {
         this.mega = false;
-        Object.assign(T.notif, { active: false, float: true, pos: [0.5, 0.65], lineWidth: 0.021 * 1.35 });
+        Object.assign(T.notif, { active: false, float: true, pos: [0.5, 0.65], lineWidth: 0.021 * 1.35, noCap: false });
       } else this.updateMega();
     }
     if (this.levelUpTimer > 0) { this.levelUpTimer -= dt; if (this.levelUpTimer <= 0) T.levelUp.active = false; }
@@ -2222,6 +2228,10 @@ function drawHUD() {
 
   if (!Game.started) T.title.active = Menu.screen === 'title';
   T.next.pos[0] = Game.nextX();
+  {
+    const nextLeft = T.next.pos[0] - Math.min(T.next.widthRatio * TW, W * 0.92) / 2 / W;
+    for (const t of [T.score, T.planes, T.level]) t.maxW = Math.max(0.1, nextLeft - t.pos[0] - 0.03);
+  }
   const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
   // while paused, the GAME START banner (timed on game time, which is frozen) is hidden so it doesn't cover the menu
   if (!(Game.paused && Game.pauseHelp)) for (const t of list) if (!(Game.paused && t === T.start)) t.draw(ctx, W, H, time, floatOn);
