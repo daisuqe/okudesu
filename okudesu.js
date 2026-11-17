@@ -417,10 +417,11 @@ const Input = {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     this.pad = null;
     for (const p of pads) if (p && p.connected) { this.pad = p; break; }
+    this.dpad = this.readDpad();
     if (this.pad) {
       const b = this.pad.buttons;
-      for (let i = 0; i < b.length; i++) {
-        const pr = b[i].pressed, k = 'J' + i;
+      for (let i = 0; i < Math.max(b.length, 16); i++) {
+        const pr = this.btn(i), k = 'J' + i;
         if (pr) { if (!this.padPrev[i]) { this.down.add(k); Synth.snd.init(); } this.held.add(k); }
         else if (this.padPrev[i]) { this.held.delete(k); this.up.add(k); }
         this.padPrev[i] = pr;
@@ -432,8 +433,34 @@ const Input = {
   kh(...ks) { return ks.some(k => this.held.has(k)); },
   ku(...ks) { return ks.some(k => this.up.has(k)); },
   axis(i) { return this.pad && this.pad.axes.length > i ? this.pad.axes[i] : 0; },
-  btnVal(i) { return this.pad && this.pad.buttons[i] ? this.pad.buttons[i].value : 0; },
-  btn(i) { return this.pad && this.pad.buttons[i] ? this.pad.buttons[i].pressed : false; },
+  btnVal(i) {
+    if (i >= 12 && i <= 15 && this.dpad && this.dpad[i - 12]) return 1;
+    return this.pad && this.pad.buttons[i] ? this.pad.buttons[i].value : 0;
+  },
+  btn(i) {
+    if (i >= 12 && i <= 15 && this.dpad && this.dpad[i - 12]) return true;   // D-pad, whatever way the browser reports it
+    return this.pad && this.pad.buttons[i] ? this.pad.buttons[i].pressed : false;
+  },
+  // D-pad as [up, down, left, right]. Standard mapping: buttons 12-15. Other controllers report it as a
+  // "hat" axis (one axis, -1 = up ... clockwise in steps of 2/7, about 1.28 when released) or as two axes 6/7.
+  readDpad() {
+    const p = this.pad;
+    if (!p) return null;
+    if (p.mapping === 'standard') return null;
+    const ax = p.axes || [];
+    for (const i of [9, 10]) {
+      const v = ax[i];
+      if (typeof v !== 'number' || Math.abs(v) > 1.05) continue;
+      const step = Math.round((v + 1) / (2 / 7));          // 0 up, 1 up-right, 2 right, ... 7 up-left
+      if (step < 0 || step > 7 || Math.abs((v + 1) - step * 2 / 7) > 0.1) continue;
+      return [step === 7 || step <= 1, step >= 3 && step <= 5, step >= 5 && step <= 7, step >= 1 && step <= 3];
+    }
+    if (ax.length >= 8 && ax.length <= 9) {
+      const x = ax[6], y = ax[7];
+      return [y < -0.5, y > 0.5, x < -0.5, x > 0.5];
+    }
+    return null;
+  },
   horizontal() {
     let k = (this.kh('KeyD', 'ArrowRight') ? 1 : 0) - (this.kh('KeyA', 'ArrowLeft') ? 1 : 0);
     const s = this.axis(0);
@@ -845,6 +872,11 @@ class Block {
     if (Controls.down('moveRight')) { this.neutralX = false; return { x: 1, y: 0, z: 0 }; }
     if (Controls.down('moveUp')) { this.neutralY = false; return { x: 0, y: 1, z: 0 }; }
     if (Controls.down('moveDown')) { this.neutralY = false; return { x: 0, y: -1, z: 0 }; }
+    const free = i => !Object.keys(Controls.pad).some(a => Controls.pad[a] === i && !a.startsWith('move'));
+    if (Input.kd('J14') && free(14)) { this.neutralX = false; return { x: -1, y: 0, z: 0 }; }
+    if (Input.kd('J15') && free(15)) { this.neutralX = false; return { x: 1, y: 0, z: 0 }; }
+    if (Input.kd('J12') && free(12)) { this.neutralY = false; return { x: 0, y: 1, z: 0 }; }
+    if (Input.kd('J13') && free(13)) { this.neutralY = false; return { x: 0, y: -1, z: 0 }; }
     let md = null;
     // left stick (with neutral return); bound keys/buttons only count toward neutral tracking
     const kx = (Controls.held('moveRight') ? 1 : 0) - (Controls.held('moveLeft') ? 1 : 0);
@@ -1091,7 +1123,7 @@ const rankTexts = [];
 for (let i = 0; i < RANK_N; i++) {
   rankTexts.push(new WireText({ text: '', pos: [0.04, 0.35 + i * 0.032], widthRatio: 0.128, lineWidth: 0.008, color: RANK_COLORS[i] || C(0, 0.9, 1), autoCenter: false, float: false }));
 }
-const pauseItems = [0, 1, 2, 3].map(i => new WireText({ pos: [0.5, 0.36 + i * 0.08], color: MENU_BLUE, float: false }));
+const pauseItems = [0, 1, 2, 3, 4].map(i => new WireText({ pos: [0.5, 0.34 + i * 0.075], color: MENU_BLUE, float: false }));
 const overItems = [0, 1].map(i => new WireText({ pos: [0.5, 0.72 + i * 0.12], color: MENU_BLUE, float: false }));
 
 function setHUD(t, text, sizeScale = 1, setLW = false) {
@@ -1328,7 +1360,7 @@ const Game = {
   togglePause() {
     this.paused = !this.paused;
     if (this.paused) {
-      this.pauseSel = 0; this.pauseNeutral = true;
+      this.pauseSel = 0; this.pauseNeutral = true; this.pauseHelp = false;
       Synth.pauseBGM();
       this.updatePauseMenu();
     } else {
@@ -1336,7 +1368,7 @@ const Game = {
       }
   },
   updatePauseMenu() {
-    const names = ['RESUME', this.muted ? 'SOUND: OFF' : 'SOUND: ON', 'RETRY', 'QUIT'];
+    const names = ['RESUME', this.muted ? 'SOUND: OFF' : 'SOUND: ON', 'HELP', 'RETRY', 'QUIT'];
     pauseItems.forEach((t, i) => this.styleMenuItem(t, names[i], i === this.pauseSel));
   },
   updateOverMenu() {
@@ -1351,7 +1383,8 @@ const Game = {
   executePause() {
     if (this.pauseSel === 0) this.togglePause();
     else if (this.pauseSel === 1) this.toggleSound();
-    else if (this.pauseSel === 2) this.startGame();
+    else if (this.pauseSel === 2) this.pauseHelp = true;    // HELP over the pause screen
+    else if (this.pauseSel === 3) this.startGame();
     else this.quitToTitle();
   },
   toggleSound() {
@@ -1377,7 +1410,7 @@ const Game = {
   },
   handlePauseInput() {
     const d = this.menuNav();
-    if (d) { this.pauseSel = (this.pauseSel + d + 4) % 4; this.updatePauseMenu(); Synth.lock(); }
+    if (d) { this.pauseSel = (this.pauseSel + d + 5) % 5; this.updatePauseMenu(); Synth.lock(); }
     if (Input.kd('J0', 'Enter', 'NumpadEnter', 'Space')) this.executePause();
   },
   handleOverInput() {
@@ -1508,6 +1541,11 @@ const Game = {
   update(dt) {
     this.processTouch();
     const click = Input.pointerDowns[0];
+    // HELP opened from the pause menu: any back / confirm key, the pause key or a tap returns to the pause menu
+    if (this.paused && this.pauseHelp) {
+      if (click || Controls.down('pause') || Input.kd('Escape', 'Backspace', 'Enter', 'NumpadEnter', 'Space', 'J0', 'J1')) this.pauseHelp = false;
+      return;
+    }
     if (click) {
       const p = { x: click.x, y: click.y };
       if (this.rects.menu.contains(p) && this.started && !this.over) { this.togglePause(); return; }
@@ -2185,14 +2223,19 @@ function drawHUD() {
   if (!Game.started) T.title.active = Menu.screen === 'title';
   T.next.pos[0] = Game.nextX();
   const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
-  for (const t of list) t.draw(ctx, W, H, time, floatOn);
+  // while paused, the GAME START banner (timed on game time, which is frozen) is hidden so it doesn't cover the menu
+  if (!(Game.paused && Game.pauseHelp)) for (const t of list) if (!(Game.paused && t === T.start)) t.draw(ctx, W, H, time, floatOn);
   if (Game.rankingVisible) { T.rankTitle.draw(ctx, W, H, time, floatOn); rankTexts.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
-  if (Game.paused) { T.pauseTitle.draw(ctx, W, H, time, floatOn); pauseItems.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
+  if (Game.paused && Game.pauseHelp) {
+    Menu.heading(ctx, 'HELP', 0.07);
+    Menu.drawHelp(ctx);
+    Menu.item(ctx, 'BACK', 0.5, 0.92, true, 0.8, 0.1);
+  } else if (Game.paused) { T.pauseTitle.draw(ctx, W, H, time, floatOn); pauseItems.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
   if (Game.over) overItems.forEach(t => t.draw(ctx, W, H, time, floatOn));
 
   if (!Game.started) Menu.draw(ctx, time);
   // controls panel while paused (PC only), generated from the current bindings
-  if (Game.paused && !isMobile) {
+  if (Game.paused && !Game.pauseHelp && !isMobile) {
     const P = a => Controls.padLabel(Controls.pad[a]);
     const K = a => Controls.keysText(a);
     const lines = ['CONTROLS',
