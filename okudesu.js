@@ -351,11 +351,16 @@ const Input = {
   held: new Set(), down: new Set(), up: new Set(),
   padPrev: [], pad: null,
   pointerDowns: [],          // {x, y, type, id}
-  touches: new Map(),        // id -> {x, y}  (touch pointers currently held)
+  touches: new Map(),        // id -> {x, y, sx, sy, t0, flicked}  (touch pointers currently held)
+  flicks: [],                // {sx, sy, dx, dy}  flick gestures recognized this frame
+  touchEnds: [],             // {sx, sy, flicked}  touches released this frame
+  FLICK_DIST: 30, FLICK_TIME: 300,   // px, ms
   init(el) {
     const keyName = e => (e.key === '+' ? 'Plus' : e.code);
     window.addEventListener('keydown', e => {
       if (AppNav.handleKey(e)) return;
+      if (ScoreUI.handleKey(e)) return;
+      if (Menu.captureKey(e)) return;
       Synth.snd.init();
       const k = keyName(e);
       if (['Tab', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -364,7 +369,7 @@ const Input = {
       if (e.code === 'NumpadAdd' && k !== 'NumpadAdd') { this.down.add('NumpadAdd'); this.held.add('NumpadAdd'); }
     });
     window.addEventListener('keyup', e => {
-      if (AppNav.open) return;
+      if (AppNav.open || ScoreUI.open) return;
       const k = keyName(e);
       this.held.delete(k); this.up.add(k);
       this.held.delete(e.code); this.up.add(e.code);
@@ -375,15 +380,32 @@ const Input = {
       el.focus();
       try { el.setPointerCapture(e.pointerId); } catch (_) {}
       this.pointerDowns.push({ x: e.clientX, y: e.clientY, type: e.pointerType, id: e.pointerId });
-      if (e.pointerType === 'touch') this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (e.pointerType === 'touch') {
+        this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t0: performance.now(), flicked: false });
+      }
       CameraCtl.pointerDown(e);
       e.preventDefault();
     });
     el.addEventListener('pointermove', e => {
-      if (this.touches.has(e.pointerId)) this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const t = this.touches.get(e.pointerId);
+      if (t) {
+        t.x = e.clientX; t.y = e.clientY;
+        const dx = t.x - t.sx, dy = t.y - t.sy;
+        if (!t.flicked && Game.flickEnabled() && performance.now() - t.t0 <= this.FLICK_TIME && Math.hypot(dx, dy) >= this.FLICK_DIST) {
+          t.flicked = true;
+          this.flicks.push({ sx: t.sx, sy: t.sy, dx, dy });
+          CameraCtl.cancelDrag(e.pointerId);   // a flick must not orbit the camera
+          return;
+        }
+      }
       CameraCtl.pointerMove(e);
     });
-    const end = e => { this.touches.delete(e.pointerId); CameraCtl.pointerUp(e); };
+    const end = e => {
+      const t = this.touches.get(e.pointerId);
+      if (t) this.touchEnds.push({ sx: t.sx, sy: t.sy, flicked: t.flicked });
+      this.touches.delete(e.pointerId);
+      CameraCtl.pointerUp(e);
+    };
     el.addEventListener('pointerup', end);
     el.addEventListener('pointercancel', end);
     el.addEventListener('contextmenu', e => e.preventDefault());
@@ -402,7 +424,7 @@ const Input = {
       }
     }
   },
-  endFrame() { this.down.clear(); this.up.clear(); this.pointerDowns.length = 0; },
+  endFrame() { this.down.clear(); this.up.clear(); this.pointerDowns.length = 0; this.flicks.length = 0; this.touchEnds.length = 0; },
   kd(...ks) { return ks.some(k => this.down.has(k)); },
   kh(...ks) { return ks.some(k => this.held.has(k)); },
   ku(...ks) { return ks.some(k => this.up.has(k)); },
@@ -422,6 +444,76 @@ const Input = {
   dpadX() { return (this.btn(15) ? 1 : 0) - (this.btn(14) ? 1 : 0); },
   dpadY() { return (this.btn(12) ? 1 : 0) - (this.btn(13) ? 1 : 0); },
 };
+
+// ============================================================
+// Controls: rebindable keyboard (2 slots) / gamepad (1 button) per action
+// ============================================================
+const ACTIONS = [
+  ['moveLeft', 'MOVE LEFT'], ['moveRight', 'MOVE RIGHT'], ['moveUp', 'MOVE UP'], ['moveDown', 'MOVE DOWN'],
+  ['pitchUp', 'PITCH UP'], ['pitchDown', 'PITCH DOWN'], ['yawLeft', 'YAW LEFT'], ['yawRight', 'YAW RIGHT'],
+  ['rollLeft', 'ROLL LEFT'], ['rollRight', 'ROLL RIGHT'], ['fastFall', 'FAST FALL'], ['hardDrop', 'HARD DROP'],
+  ['swap', 'SWAP NEXT'], ['pause', 'PAUSE'],
+];
+const DEFAULT_KEYS = {
+  moveLeft: ['KeyA', 'ArrowLeft'], moveRight: ['KeyD', 'ArrowRight'], moveUp: ['KeyW', 'ArrowUp'], moveDown: ['KeyS', 'ArrowDown'],
+  pitchUp: ['KeyI', 'Numpad8'], pitchDown: ['KeyK', 'Numpad2'], yawLeft: ['KeyJ', 'Numpad4'], yawRight: ['KeyL', 'Numpad6'],
+  rollLeft: ['KeyU', 'Numpad7'], rollRight: ['KeyO', 'Numpad9'], fastFall: ['Space', 'Numpad3'], hardDrop: ['ShiftLeft', 'Enter'],
+  swap: ['Tab', 'KeyC'], pause: ['Escape', null],
+};
+// W3C standard gamepad indices: 0 A, 1 B, 2 X, 3 Y, 4 LB, 5 RB, 6 LT, 7 RT, 8 BACK, 9 START, 12-15 D-pad
+const DEFAULT_PAD = {
+  moveLeft: 14, moveRight: 15, moveUp: 12, moveDown: 13, pitchUp: 3, pitchDown: 0, yawLeft: 2, yawRight: 1,
+  rollLeft: 4, rollRight: 5, fastFall: 7, hardDrop: null, swap: 6, pause: 9,
+};
+const PAD_NAMES = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'BACK', 'START', 'LS', 'RS', 'UP', 'DOWN', 'LEFT', 'RIGHT'];
+const KEYS_STORE = 'OKUDESU_Keys', PAD_STORE = 'OKUDESU_Pad';
+const Controls = {
+  keys: {}, pad: {},
+  load() {
+    this.resetKeys(); this.resetPad();
+    try {
+      const k = JSON.parse(localStorage.getItem(KEYS_STORE) || 'null');
+      if (k) for (const a in DEFAULT_KEYS) if (Array.isArray(k[a])) this.keys[a] = [k[a][0] || null, k[a][1] || null];
+      const p = JSON.parse(localStorage.getItem(PAD_STORE) || 'null');
+      if (p) for (const a in DEFAULT_PAD) if (a in p) this.pad[a] = typeof p[a] === 'number' ? p[a] : null;
+    } catch (e) {}
+  },
+  save() {
+    try { localStorage.setItem(KEYS_STORE, JSON.stringify(this.keys)); localStorage.setItem(PAD_STORE, JSON.stringify(this.pad)); } catch (e) {}
+  },
+  resetKeys() { for (const a in DEFAULT_KEYS) this.keys[a] = DEFAULT_KEYS[a].slice(); },
+  resetPad() { Object.assign(this.pad, DEFAULT_PAD); },
+  bindKey(action, slot, code) {
+    for (const a in this.keys) this.keys[a] = this.keys[a].map(c => (c === code ? null : c));  // no duplicates
+    this.keys[action][slot] = code;
+    this.save();
+  },
+  bindPad(action, idx) {
+    for (const a in this.pad) if (this.pad[a] === idx) this.pad[a] = null;
+    this.pad[action] = idx;
+    this.save();
+  },
+  down(a) {
+    const p = this.pad[a];
+    return Input.kd(...this.keys[a].filter(Boolean)) || (p != null && Input.kd('J' + p));
+  },
+  held(a) {
+    const p = this.pad[a];
+    return Input.kh(...this.keys[a].filter(Boolean)) || (p != null && Input.btnVal(p) > 0.3);
+  },
+  keyLabel(code) {
+    if (!code) return '-';
+    const M = { ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', ArrowUp: 'UP', ArrowDown: 'DOWN', Escape: 'ESC', Space: 'SPACE',
+      ShiftLeft: 'LSHIFT', ShiftRight: 'RSHIFT', ControlLeft: 'LCTRL', ControlRight: 'RCTRL', AltLeft: 'LALT', AltRight: 'RALT',
+      Enter: 'ENTER', NumpadEnter: 'NUMENTER', Tab: 'TAB', Backspace: 'BKSP', Comma: ',', Period: '.', Minus: '-', Plus: '+' };
+    if (M[code]) return M[code];
+    return code.replace(/^Key/, '').replace(/^Digit/, '').replace(/^Numpad/, 'NUM').toUpperCase();
+  },
+  padLabel(i) { return i == null ? '-' : (PAD_NAMES[i] || 'B' + i); },
+  // human-readable summary of an action for help / controls panel
+  keysText(a) { return this.keys[a].filter(Boolean).map(c => this.keyLabel(c)).join(' / ') || '-'; },
+};
+Controls.load();
 
 // ============================================================
 // three.js setup
@@ -725,35 +817,35 @@ class Block {
     if (!this.locked) this.handleFall(dt);
   }
   handleInput() {
-    const ltPressed = Input.kd('NumpadAdd', 'Plus', 'Tab', 'Numpad1', 'Digit1', 'KeyC', 'KeyE', 'J6', 'J8');
-    let ltAxis = false;
-    if (Input.btnVal(6) > 0.5) { if (!this.ltPrev) ltAxis = true; this.ltPrev = true; } else this.ltPrev = false;
-    if ((ltPressed || ltAxis) && Game.canSwap()) { Game.swapWithNextBlock(); return true; }
+    if (Controls.down('swap') && Game.canSwap()) { Game.swapWithNextBlock(); return true; }
 
     const md = this.slideInput();
     if (md && this.tryMove(md)) this.sync();
 
     let axis = null;
-    if (Input.kd('KeyU', 'J4', 'Numpad7')) axis = AX.forward;
-    else if (Input.kd('KeyO', 'J5', 'Numpad9')) axis = AX.back;
-    else if (Input.kd('KeyI', 'J3', 'Numpad8')) axis = AX.right;
-    else if (Input.kd('KeyK', 'J0', 'Numpad2')) axis = AX.left;
-    else if (Input.kd('KeyJ', 'J2', 'Numpad4')) axis = AX.up;
-    else if (Input.kd('KeyL', 'J1', 'Numpad6')) axis = AX.down;
+    if (Controls.down('rollLeft')) axis = AX.forward;
+    else if (Controls.down('rollRight')) axis = AX.back;
+    else if (Controls.down('pitchUp')) axis = AX.right;
+    else if (Controls.down('pitchDown')) axis = AX.left;
+    else if (Controls.down('yawLeft')) axis = AX.up;
+    else if (Controls.down('yawRight')) axis = AX.down;
     if (axis) { this.tryRotate(axis); this.sync(); }
 
-    if (Input.kd('ShiftLeft', 'ShiftRight', 'Enter', 'NumpadEnter')) { this.hardDrop(); return true; }
+    if (Controls.down('hardDrop')) { this.hardDrop(); return true; }
     return false;
   }
   slideInput() {
-    if (Input.kd('KeyA', 'ArrowLeft')) { this.neutralX = false; return { x: -1, y: 0, z: 0 }; }
-    if (Input.kd('KeyD', 'ArrowRight')) { this.neutralX = false; return { x: 1, y: 0, z: 0 }; }
-    if (Input.kd('KeyW', 'ArrowUp')) { this.neutralY = false; return { x: 0, y: 1, z: 0 }; }
-    if (Input.kd('KeyS', 'ArrowDown')) { this.neutralY = false; return { x: 0, y: -1, z: 0 }; }
+    if (Controls.down('moveLeft')) { this.neutralX = false; return { x: -1, y: 0, z: 0 }; }
+    if (Controls.down('moveRight')) { this.neutralX = false; return { x: 1, y: 0, z: 0 }; }
+    if (Controls.down('moveUp')) { this.neutralY = false; return { x: 0, y: 1, z: 0 }; }
+    if (Controls.down('moveDown')) { this.neutralY = false; return { x: 0, y: -1, z: 0 }; }
     let md = null;
-    const h = Input.horizontal(), v = Input.vertical(), dx = Input.dpadX(), dy = Input.dpadY();
-    const ch = Math.abs(h) > Math.abs(dx) ? h : dx;
-    const cv = Math.abs(v) > Math.abs(dy) ? v : dy;
+    // left stick (with neutral return); bound keys/buttons only count toward neutral tracking
+    const kx = (Controls.held('moveRight') ? 1 : 0) - (Controls.held('moveLeft') ? 1 : 0);
+    const ky = (Controls.held('moveUp') ? 1 : 0) - (Controls.held('moveDown') ? 1 : 0);
+    const sx = Input.axis(0), sy = -Input.axis(1);
+    const ch = Math.abs(sx) > Math.abs(kx) ? sx : kx;
+    const cv = Math.abs(sy) > Math.abs(ky) ? sy : ky;
     if (Math.abs(ch) < 0.2) this.neutralX = true;
     else if (this.neutralX) {
       if (ch > 0.6) { md = { x: 1, y: 0, z: 0 }; this.neutralX = false; }
@@ -767,8 +859,7 @@ class Block {
     return md;
   }
   handleFall(dt) {
-    const rt = Input.btnVal(7) > 0.3;
-    const fast = Input.kh('Space', 'Numpad3', 'Digit3') || this.externalFastDrop || rt;
+    const fast = Controls.held('fastFall') || this.externalFastDrop;
     Synth.setFastDropping(fast && !this.locked);
     const interval = fast ? 0.04 : this.fallInterval;
     this.fallTimer += dt;
@@ -856,7 +947,10 @@ const CameraCtl = {
   yaw: 0, pitch: 0, drag: null, shakeI: 0, shakeD: 0, shakeT: 0,
   shake(i, d) { this.shakeI = i; this.shakeD = d; this.shakeT = d; },
   pointerDown(e) {
-    if (this.drag === null && Game.isInDragZone(e.clientX, e.clientY)) this.drag = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    if (this.drag === null && Game.isInDragZone(e.clientX, e.clientY)) this.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, yaw: this.yaw, pitch: this.pitch };
+  },
+  cancelDrag(id) {
+    if (this.drag && this.drag.id === id) { this.yaw = this.drag.yaw; this.pitch = this.drag.pitch; this.drag = null; }
   },
   pointerMove(e) {
     if (!this.drag || this.drag.id !== e.pointerId) return;
@@ -977,7 +1071,6 @@ const T = {
   next: new WireText({ text: 'NEXT BLOCK', pos: [0.86, 0.08], widthRatio: 10 * CHAR_W * 1.2, lineWidth: 0.021 * 1.2, color: GREEN, float: false, active: false }),
   start: new WireText({ text: 'GAME START', pos: [0.5, 0.56], widthRatio: 0.57, lineWidth: 0.06, color: GREEN, active: false }),
   over: new WireText({ text: 'GAME OVER', pos: [0.5, 0.35], widthRatio: 0.46, lineWidth: 0.05, color: C(1, 0.1, 0.1), active: false }),
-  pressA: new WireText({ text: 'CLICK OR PRESS [A] TO START', pos: [0.5, 0.52], widthRatio: 0.55, lineWidth: 0.021, color: C(1, 0.9, 0) }),
   notif: new WireText({ text: ' ', pos: [0.5, 0.65], widthRatio: CHAR_W * 1.35, lineWidth: 0.021 * 1.35, color: COL.magenta, active: false }),
   levelUp: new WireText({ text: ' ', pos: [0.5, 0.52], widthRatio: CHAR_W * 2.025, lineWidth: 0.021 * 2.025, color: COL.yellow, active: false }),
   record: new WireText({ text: ' ', pos: [0.5, 0.425], widthRatio: CHAR_W * 2.025, lineWidth: 0.021 * 2.025, color: COL.yellow, active: false }),
@@ -1022,8 +1115,9 @@ const Game = {
 
   startGame() {
     this.score = 0; this.lines = 0; this.level = 1;
+    this.blocks = 0; this.playMs = 0;   // sent with the score to the online ranking
+    this.skipBlockFrame = true;         // the key that chose PLAY/RETRY must not also act on the first block
     this.over = false; this.paused = false; this.started = true;
-    T.pressA.active = false;
     T.notif.active = T.levelUp.active = T.record.active = false;
     this.notifTimer = this.levelUpTimer = this.recordTimer = 0;
     this.mega = false;
@@ -1055,7 +1149,7 @@ const Game = {
     this.destroyPreview();
     this.started = false; this.over = false; this.paused = false;
     for (const k of ['next', 'start', 'over', 'notif', 'levelUp', 'record', 'score', 'planes', 'level']) T[k].active = false;
-    T.title.active = true; T.pressA.active = true;
+    T.title.active = true; Menu.open('title');
     this.rankingVisible = false; this.mega = false;
     Synth.stopBGM(); Synth.setFastDropping(false);
   },
@@ -1123,6 +1217,7 @@ const Game = {
 
   onBlockLocked() {
     this.active = null;
+    this.blocks++;
     Grid.processLineClear(full => this.onLineClearComplete(full));
   },
 
@@ -1210,6 +1305,7 @@ const Game = {
     this.rankingVisible = true;
     this.overSel = 0;
     this.updateOverMenu();
+    ScoreUI.openFor({ score: this.score, planes: this.lines, level: this.level, blocks: this.blocks, duration: Math.round(this.playMs) });
   },
   rebuildRanking() {
     const r = loadRanking();
@@ -1314,14 +1410,39 @@ const Game = {
     else if (Rt[name]) { if (b) b.triggerRotate(Rt[name]); }
     else if (name === 'swap') { if (this.canSwap()) this.swapWithNextBlock(); }
   },
+  // Flick controls: landscape touch screens during play.
+  // Left half = slide move, right half = pitch/yaw rotate (no roll by flick).
+  flickEnabled() { return W > H && this.started && !this.over && !this.paused; },
+  flickAction(f) {
+    const b = this.active; if (!b) return;
+    const horiz = Math.abs(f.dx) >= Math.abs(f.dy);
+    if (f.sx < W / 2) {
+      if (horiz) b.triggerMove({ x: f.dx > 0 ? 1 : -1, y: 0, z: 0 });
+      else b.triggerMove({ x: 0, y: f.dy < 0 ? 1 : -1, z: 0 });
+    } else {
+      // same axes as the rotate buttons: up = rotUp, down = rotDown, left = rotLeft, right = rotRight
+      if (horiz) b.triggerRotate(f.dx < 0 ? AX.up : AX.down);
+      else b.triggerRotate(f.dy < 0 ? AX.right : AX.left);
+    }
+  },
   processTouch() {
     this.touchActive = {};
     if (!this.started || this.over || this.paused) return;
     const order = ['moveLeft', 'moveRight', 'moveUp', 'moveDown', 'rotUp', 'rotDown', 'rotLeft', 'rotRight', 'rollLeft', 'rollRight', 'swap'];
+    const buttonAt = p => order.find(n => this.rects[n].contains(p));
+    // With flicks enabled, move/rotate buttons act on release (tap) so a flick starting on a button doesn't also press it
+    const flick = this.flickEnabled();
+    const deferred = n => flick && n !== 'swap';
     for (const pd of Input.pointerDowns) {
       if (pd.type !== 'touch') continue;
-      const p = { x: pd.x, y: pd.y };
-      for (const n of order) if (this.rects[n].contains(p)) { this.touchAction(n); break; }
+      const n = buttonAt({ x: pd.x, y: pd.y });
+      if (n && !deferred(n)) this.touchAction(n);
+    }
+    for (const f of Input.flicks) if (flick) this.flickAction(f);
+    for (const te of Input.touchEnds) {
+      if (te.flicked) continue;
+      const n = buttonAt({ x: te.sx, y: te.sy });
+      if (n && deferred(n)) this.touchAction(n);
     }
     for (const p of Input.touches.values()) {
       for (const n of [...order, 'space']) if (this.rects[n].contains(p)) this.touchActive[n] = true;
@@ -1355,13 +1476,9 @@ const Game = {
       }
     }
 
-    if (!this.started) {
-      T.pressA.active = Math.floor(this.time * 2.5) % 2 === 0;
-      if (Input.kd('J0', 'J1', 'Enter', 'NumpadEnter', 'Space') || click) this.startGame();
-      return;
-    }
+    if (!this.started) { Menu.update(click); return; }
 
-    if (Input.kd('Escape', 'J9') && !this.over) { this.togglePause(); return; }
+    if (Controls.down('pause') && !this.over) { this.togglePause(); return; }
     if (this.paused) { this.handlePauseInput(); return; }
 
     if (this.over) {
@@ -1370,6 +1487,7 @@ const Game = {
       return;
     }
 
+    this.playMs += dt * 1000;
     if (this.notifTimer > 0) { this.notifTimer -= dt; if (this.notifTimer <= 0) T.notif.active = false; }
     if (this.mega) {
       this.megaTimer -= dt;
@@ -1384,6 +1502,587 @@ const Game = {
     if (this.preview) this.preview.group.rotateOnAxis(new THREE.Vector3(0.3, 1, -0.2).normalize(), 25 * Math.PI / 180 * dt);
   },
 };
+
+// ============================================================
+// Help text (the only localized screen: ja / ko / zh / en)
+// ============================================================
+const LANG_STORE = 'OKUDESU_Lang';
+const LANG_ORDER = ['auto', 'en', 'ja', 'ko', 'zh'];
+const LANG_NAMES = { en: 'ENGLISH', ja: 'JAPANESE', ko: 'KOREAN', zh: 'CHINESE' };
+function detectLang() {
+  const l = (navigator.language || '').toLowerCase();
+  return l.startsWith('ja') ? 'ja' : l.startsWith('ko') ? 'ko' : l.startsWith('zh') ? 'zh' : 'en';
+}
+// Lines starting with '#' are headings.
+function helpLines(lang, mobile) {
+  const K = a => Controls.keysText(a);
+  const P = a => Controls.padLabel(Controls.pad[a]);
+  const L = {
+    ja: {
+      pc: [
+        '#操作方法（キーボード / コントローラー）',
+        `移動：${K('moveLeft')}・${K('moveRight')}・${K('moveUp')}・${K('moveDown')}（十字キー / 左スティック）`,
+        `縦回転：${K('pitchUp')}・${K('pitchDown')}（${P('pitchUp')}・${P('pitchDown')}）`,
+        `横回転：${K('yawLeft')}・${K('yawRight')}（${P('yawLeft')}・${P('yawRight')}）`,
+        `ひねり回転：${K('rollLeft')}・${K('rollRight')}（${P('rollLeft')}・${P('rollRight')}）`,
+        `高速落下：${K('fastFall')}（${P('fastFall')}）押している間`,
+        `即落下：${K('hardDrop')}（${P('hardDrop')}）`,
+        `ネクストと交換：${K('swap')}（${P('swap')}）1ブロックにつき1回`,
+        `ポーズ：${K('pause')}（${P('pause')}）`,
+        '視点の回転：画面中央をマウスでドラッグ / 右スティック',
+        'キー配置は SETTING で変更できます。',
+      ],
+      mobile: [
+        '#操作方法（横画面がおすすめ）',
+        '左側のボタン：ブロックの移動（上下左右）',
+        '右側のボタン：上下で縦回転、左右で横回転、上の段の左右でひねり回転',
+        '下の中央：押している間、高速落下',
+        '右上：ネクストと交換（1ブロックにつき1回）　左上：メニュー',
+        '#フリック操作（横画面）',
+        '左半分をフリック：その方向へ移動',
+        '右半分をフリック：その方向へ回転（縦・横回転のみ）',
+        '画面中央をゆっくりドラッグ：視点の回転',
+      ],
+      rules: [
+        '#ルール',
+        'ブロックは画面の奥に向かって落ちていきます。',
+        '4×4の面をすべて埋めると、その面が消えて得点になります。',
+        '一度に多く消すほど、奥の面ほど高得点。全部消すとボーナス。',
+        '3面消すごとにレベルが上がり、落下が速くなります。',
+        'ブロックが手前まで積み上がるとゲームオーバーです。',
+      ],
+    },
+    ko: {
+      pc: [
+        '#조작 방법 (키보드 / 컨트롤러)',
+        `이동: ${K('moveLeft')}, ${K('moveRight')}, ${K('moveUp')}, ${K('moveDown')} (방향 패드 / 왼쪽 스틱)`,
+        `세로 회전: ${K('pitchUp')}, ${K('pitchDown')} (${P('pitchUp')}, ${P('pitchDown')})`,
+        `가로 회전: ${K('yawLeft')}, ${K('yawRight')} (${P('yawLeft')}, ${P('yawRight')})`,
+        `비틀기 회전: ${K('rollLeft')}, ${K('rollRight')} (${P('rollLeft')}, ${P('rollRight')})`,
+        `빠른 낙하: ${K('fastFall')} (${P('fastFall')}) 누르고 있는 동안`,
+        `즉시 낙하: ${K('hardDrop')} (${P('hardDrop')})`,
+        `다음 블록과 교환: ${K('swap')} (${P('swap')}) 블록당 1회`,
+        `일시 정지: ${K('pause')} (${P('pause')})`,
+        '시점 회전: 화면 중앙을 마우스로 드래그 / 오른쪽 스틱',
+        '키 설정은 SETTING에서 바꿀 수 있습니다.',
+      ],
+      mobile: [
+        '#조작 방법 (가로 화면 권장)',
+        '왼쪽 버튼: 블록 이동 (상하좌우)',
+        '오른쪽 버튼: 위아래는 세로 회전, 좌우는 가로 회전, 윗줄 좌우는 비틀기 회전',
+        '아래 중앙: 누르고 있는 동안 빠른 낙하',
+        '오른쪽 위: 다음 블록과 교환 (블록당 1회)   왼쪽 위: 메뉴',
+        '#플릭 조작 (가로 화면)',
+        '왼쪽 절반을 플릭: 그 방향으로 이동',
+        '오른쪽 절반을 플릭: 그 방향으로 회전 (세로·가로 회전만)',
+        '화면 중앙을 천천히 드래그: 시점 회전',
+      ],
+      rules: [
+        '#규칙',
+        '블록은 화면 안쪽을 향해 떨어집니다.',
+        '4×4 면을 모두 채우면 그 면이 사라지고 점수를 얻습니다.',
+        '한 번에 많이 지울수록, 안쪽 면일수록 고득점. 전부 지우면 보너스.',
+        '3면을 지울 때마다 레벨이 오르고 낙하가 빨라집니다.',
+        '블록이 앞쪽까지 쌓이면 게임 오버입니다.',
+      ],
+    },
+    zh: {
+      pc: [
+        '#操作方法（键盘 / 手柄）',
+        `移动：${K('moveLeft')}、${K('moveRight')}、${K('moveUp')}、${K('moveDown')}（十字键 / 左摇杆）`,
+        `纵向旋转：${K('pitchUp')}、${K('pitchDown')}（${P('pitchUp')}、${P('pitchDown')}）`,
+        `横向旋转：${K('yawLeft')}、${K('yawRight')}（${P('yawLeft')}、${P('yawRight')}）`,
+        `扭转旋转：${K('rollLeft')}、${K('rollRight')}（${P('rollLeft')}、${P('rollRight')}）`,
+        `快速下落：${K('fastFall')}（${P('fastFall')}）按住期间`,
+        `立即下落：${K('hardDrop')}（${P('hardDrop')}）`,
+        `与下一个方块交换：${K('swap')}（${P('swap')}）每个方块限1次`,
+        `暂停：${K('pause')}（${P('pause')}）`,
+        '旋转视角：用鼠标拖动画面中央 / 右摇杆',
+        '按键可在 SETTING 中更改。',
+      ],
+      mobile: [
+        '#操作方法（推荐横屏）',
+        '左侧按钮：移动方块（上下左右）',
+        '右侧按钮：上下为纵向旋转，左右为横向旋转，上排左右为扭转旋转',
+        '下方中央：按住期间快速下落',
+        '右上：与下一个方块交换（每个方块限1次）　左上：菜单',
+        '#滑动操作（横屏）',
+        '在左半边滑动：向该方向移动',
+        '在右半边滑动：向该方向旋转（仅纵向、横向旋转）',
+        '在画面中央慢慢拖动：旋转视角',
+      ],
+      rules: [
+        '#规则',
+        '方块会朝画面深处落下。',
+        '填满一整个4×4的面，该面就会消除并得分。',
+        '一次消除越多、越深处的面得分越高。全部消除有奖励。',
+        '每消除3个面等级提升，下落速度变快。',
+        '方块堆到最前面时游戏结束。',
+      ],
+    },
+    en: {
+      pc: [
+        '#Controls (keyboard / controller)',
+        `Move: ${K('moveLeft')}, ${K('moveRight')}, ${K('moveUp')}, ${K('moveDown')} (D-pad / left stick)`,
+        `Pitch rotate: ${K('pitchUp')}, ${K('pitchDown')} (${P('pitchUp')}, ${P('pitchDown')})`,
+        `Yaw rotate: ${K('yawLeft')}, ${K('yawRight')} (${P('yawLeft')}, ${P('yawRight')})`,
+        `Roll rotate: ${K('rollLeft')}, ${K('rollRight')} (${P('rollLeft')}, ${P('rollRight')})`,
+        `Fast fall: ${K('fastFall')} (${P('fastFall')}) while held`,
+        `Hard drop: ${K('hardDrop')} (${P('hardDrop')})`,
+        `Swap with next: ${K('swap')} (${P('swap')}) once per block`,
+        `Pause: ${K('pause')} (${P('pause')})`,
+        'Rotate view: drag the middle of the screen / right stick',
+        'You can change the key layout in SETTING.',
+      ],
+      mobile: [
+        '#Controls (landscape recommended)',
+        'Left buttons: move the block (up, down, left, right)',
+        'Right buttons: up/down to pitch, left/right to yaw, top-row left/right to roll',
+        'Bottom center: fast fall while held',
+        'Top right: swap with next (once per block)   Top left: menu',
+        '#Flick controls (landscape)',
+        'Flick on the left half: move in that direction',
+        'Flick on the right half: rotate in that direction (pitch and yaw only)',
+        'Slowly drag the middle of the screen: rotate the view',
+      ],
+      rules: [
+        '#Rules',
+        'Blocks fall away from you, into the screen.',
+        'Fill a whole 4x4 layer to clear it and score points.',
+        'Clearing more layers at once, and deeper layers, scores more. Clearing everything gives a bonus.',
+        'Every 3 layers cleared, the level goes up and blocks fall faster.',
+        'The game is over when blocks pile up to the front.',
+      ],
+    },
+  }[lang];
+  return [...(mobile ? L.mobile : L.pc), '', ...L.rules];
+}
+
+// ============================================================
+// Online ranking (Cloudflare Workers + D1, same scheme as PartlyRainy)
+//   Top 100, one entry (best) per name. Names: letters, digits and spaces, up to 12.
+//   To cut requests, the list / 100th-place score / own best are cached in localStorage.
+// ============================================================
+const SCORE_API = 'https://okudesu-scores.haradadaisuke.workers.dev';
+const NAME_STORE = 'OKUDESU_Name', RK_STORE = 'OKUDESU_Rk';
+const cleanPlayerName = v => String(v || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9 ]/g, '').replace(/ {2,}/g, ' ').slice(0, 12);
+const Online = {
+  api: (() => { try { return (new URLSearchParams(location.search).get('api') || SCORE_API).replace(/\/+$/, ''); } catch (e) { return SCORE_API; } })(),
+  LIST_MS: 60000, CUT_MS: 30 * 60000, BEST_MS: 6 * 3600000, ROWS: 10,
+  state: 'idle', list: [], scroll: 0, mem_: null,
+  mem() {
+    if (!this.mem_) { try { this.mem_ = JSON.parse(localStorage.getItem(RK_STORE) || '{}') || {}; } catch (e) { this.mem_ = {}; } }
+    return this.mem_;
+  },
+  set(patch) { Object.assign(this.mem(), patch); try { localStorage.setItem(RK_STORE, JSON.stringify(this.mem_)); } catch (e) {} },
+  cutoff() { const m = this.mem(); return m.ct && Date.now() - m.ct < this.CUT_MS ? (m.cutoff || 0) : 0; },
+  best() { const m = this.mem(); return m.bt && Date.now() - m.bt < this.BEST_MS ? (m.best || 0) : 0; },
+  playerName() { try { return localStorage.getItem(NAME_STORE) || ''; } catch (e) { return ''; } },
+  async fetchTop(force) {
+    const m = this.mem();
+    if (!force && m.list && m.lt && Date.now() - m.lt < this.LIST_MS) return m.list;
+    const r = await fetch(this.api + '/scores', { cache: 'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    this.set({ list: d.scores || [], lt: Date.now(), cutoff: d.cutoff || 0, ct: Date.now() });
+    return d.scores || [];
+  },
+  async submit(name, data) {
+    const r = await fetch(this.api + '/scores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...data }) });
+    const d = await r.json().catch(() => ({}));
+    if (d.error === 'below_cutoff') this.set({ cutoff: d.cutoff || 0, ct: Date.now() });
+    else if (r.ok) this.set({ cutoff: d.cutoff || 0, ct: Date.now(), best: d.best, bt: Date.now(), ...(d.updated ? { lt: 0 } : {}) });
+    return { ok: r.ok, ...d };
+  },
+  openList(force = false, focusRank = 0) {
+    this.state = 'loading'; this.scroll = 0;
+    this.fetchTop(force).then(list => {
+      this.list = list; this.state = 'ok';
+      if (focusRank) this.scroll = clamp(focusRank - 5, 0, Math.max(0, list.length - this.ROWS));
+    }).catch(() => { this.state = 'error'; });
+  },
+  scrollBy(d) { this.scroll = clamp(this.scroll + d, 0, Math.max(0, this.list.length - this.ROWS)); },
+  drawList(ctx) {
+    const say = (text, color) => new WireText({ text, pos: [0.5, 0.45], widthRatio: Math.min(0.8, text.length * CHAR_W * 1.3), lineWidth: 0.016, color, float: false })
+      .draw(ctx, W, H, 0, false);
+    if (this.state === 'loading') return say('LOADING...', MENU_BLUE);
+    if (this.state === 'error') return say('COULD NOT REACH THE SERVER', COL.red);
+    if (!this.list.length) return say('NO SCORES YET', MENU_BLUE);
+    // rows fit between the heading and BACK; letters are as large as the row pitch allows (0.3 char gap)
+    const top = 0.17, bottom = 0.83, n = this.ROWS;
+    const step = (bottom - top) / (n - 1);
+    const rows = this.list.slice(this.scroll, this.scroll + n);
+    const sample = '100  ' + 'M'.repeat(12) + '  9999999';
+    const unit = Math.min(step * H / (1.3 * 80), 0.9 * W / unscaledWidth(sample), 10 * CHAR_W * 1.2 * W / unscaledWidth('MOVE RIGHT'));
+    const wOf = t => unscaledWidth(t) * unit / W;
+    const gap = wOf('AA');
+    const rankW = wOf('100'), nameW = Math.max(wOf('NAME'), ...rows.map(r => wOf(String(r.name)))), scoreW = Math.max(...rows.map(r => wOf(String(r.score))));
+    const total = rankW + gap + nameW + gap + scoreW, x0 = 0.5 - total / 2;
+    const me = this.playerName().toUpperCase();
+    const put = (text, x, y, color) => new WireText({ text, pos: [x, y], widthRatio: wOf(text), lineWidth: 0.014, color, autoCenter: false, float: false })
+      .draw(ctx, W, H, 0, false);
+    rows.forEach((r, i) => {
+      const rank = this.scroll + i + 1, y = top + i * step;
+      const color = String(r.name).toUpperCase() === me && me ? COL.yellow : (RANK_COLORS[rank - 1] || C(0, 0.9, 1));
+      const rs = String(rank), ss = String(r.score);
+      put(rs, x0 + rankW - wOf(rs), y, color);                       // rank: right-aligned
+      put(String(r.name), x0 + rankW + gap, y, color);
+      put(ss, x0 + total - wOf(ss), y, color);                       // score: right-aligned
+    });
+    ctx.font = `${Math.round(clamp(H * 0.028, 12, 20))}px VT323, monospace`;
+    ctx.fillStyle = 'rgb(150,160,170)'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    const last = Math.min(this.list.length, this.scroll + n);
+    ctx.fillText(`${this.scroll + 1}-${last} / ${this.list.length}` + (this.list.length > n ? '   UP/DOWN: SCROLL   LEFT/RIGHT: PAGE' : ''), W / 2, H - 6);
+  },
+};
+
+// Name entry shown on game over (DOM panel). All text in English.
+const ScoreUI = {
+  open: false, data: null, state: '', neutral: true,
+  init() {
+    const $ = id => document.getElementById(id);
+    this.modal = $('scoreModal'); this.title = $('scoreTitle'); this.input = $('scoreName'); this.msg = $('scoreMsg');
+    this.b1 = $('scoreB1'); this.b2 = $('scoreB2');
+    if (!this.modal || !this.input || !this.b1 || !this.b2) { this.modal = null; return; }   // old cached index.html: no name entry
+    this.input.addEventListener('input', () => {
+      const v = cleanPlayerName(this.input.value);
+      if (v !== this.input.value) this.input.value = v;
+      try { if (v.trim()) localStorage.setItem(NAME_STORE, v.trim()); } catch (e) {}
+    });
+    this.b1.addEventListener('click', () => this.act(1));
+    this.b2.addEventListener('click', () => this.act(2));
+  },
+  openFor(data) {
+    if (!this.modal || !Online.api || data.score <= 0) return;
+    this.data = data;
+    const cut = Online.cutoff();
+    if (data.score <= Online.best()) return this.show('info', 'GAME OVER', 'NOT HIGHER THAN YOUR BEST SCORE');
+    if (cut > 0 && data.score <= cut) return this.show('info', 'GAME OVER', `DID NOT REACH 100TH PLACE (${cut})`);
+    this.show('entry', 'ENTER YOUR NAME', '');
+  },
+  show(state, title, msg) {
+    this.state = state; this.open = true; this.neutral = false;
+    Input.held.clear();
+    this.title.textContent = title; this.msg.textContent = msg;
+    const entry = state === 'entry';
+    this.input.hidden = !entry;
+    if (entry && !this.input.value) this.input.value = cleanPlayerName(Online.playerName());
+    const labels = { entry: ['SEND', 'SKIP'], sending: ['SEND', 'SKIP'], result: ['RANKING', 'OK'], info: ['OK', ''] }[state];
+    this.b1.textContent = labels[0]; this.b2.textContent = labels[1]; this.b2.hidden = !labels[1];
+    this.b1.disabled = this.b2.disabled = state === 'sending';
+    this.modal.hidden = false;
+    if (entry && !isMobile) this.input.focus();
+    else if (state !== 'sending') this.b1.focus();
+  },
+  close() { this.open = false; this.modal.hidden = true; this.state = ''; hudCanvas.focus(); },
+  async act(btn) {
+    if (this.state === 'entry') {
+      if (btn === 2) return this.close();
+      const name = cleanPlayerName(this.input.value).trim();
+      if (!name) { this.msg.textContent = 'ENTER A NAME (LETTERS, NUMBERS, SPACES)'; return; }
+      try { localStorage.setItem(NAME_STORE, name); } catch (e) {}
+      this.show('sending', 'ENTER YOUR NAME', 'SENDING...');
+      this.input.hidden = false;
+      let res;
+      try { res = await Online.submit(name, this.data); } catch (e) { res = { ok: false, error: 'network' }; }
+      if (!this.open) return;
+      if (res.error === 'below_cutoff') return this.show('info', 'GAME OVER', `DID NOT REACH 100TH PLACE (${res.cutoff || 0})`);
+      if (!res.ok) {
+        const E = { too_many: 'TOO MANY NAMES FROM THIS CONNECTION', too_fast: 'PLEASE WAIT A MOMENT AND TRY AGAIN',
+          bad_name: 'USE LETTERS, NUMBERS AND SPACES ONLY', network: 'COULD NOT REACH THE SERVER' };
+        this.show('entry', 'ENTER YOUR NAME', E[res.error] || 'COULD NOT SEND THE SCORE');
+        return;
+      }
+      this.rank = res.rank;
+      this.show('result', `YOU ARE #${res.rank}!`, res.updated ? '' : `YOUR BEST IS ${res.best}`);
+    } else if (this.state === 'result') {
+      this.close();
+      if (btn === 1) { Game.quitToTitle(); Menu.open('ranking'); Online.openList(true, this.rank); }
+    } else if (this.state === 'info') this.close();
+  },
+  // keyboard: returns true when the key must not reach the game
+  handleKey(e) {
+    if (!this.open) return false;
+    const c = e.code;
+    if (c === 'Escape') { e.preventDefault(); if (this.state !== 'sending') this.close(); }
+    else if ((c === 'Enter' || c === 'NumpadEnter') && document.activeElement === this.input) { e.preventDefault(); this.act(1); }
+    else if ((c === 'ArrowLeft' || c === 'ArrowRight') && document.activeElement !== this.input && !this.b2.hidden) {
+      e.preventDefault(); (document.activeElement === this.b1 ? this.b2 : this.b1).focus();
+    }
+    return true;
+  },
+  pollPad() {
+    if (this.state === 'sending') return;
+    const x = Input.axis(0);
+    if (Math.abs(x) < 0.2) this.neutral = true;
+    const toggle = Input.kd('J14', 'J15') || (this.neutral && Math.abs(x) > 0.6 && !(this.neutral = false));
+    if (toggle && !this.b2.hidden) (document.activeElement === this.b1 ? this.b2 : this.b1).focus();
+    if (Input.kd('J0')) (document.activeElement === this.b2 ? this.b2 : this.b1).click();
+    else if (Input.kd('J1')) this.close();
+  },
+};
+
+// ============================================================
+// Title menu and sub screens (PLAY / SETTING / RANKING / HELP) — English except HELP
+// ============================================================
+const Menu = {
+  screen: 'title', sel: 0, slot: 0, capture: null, neutralV: true, neutralH: true, langSetting: 'auto',
+  init() {
+    try { const l = localStorage.getItem(LANG_STORE); if (LANG_ORDER.includes(l)) this.langSetting = l; } catch (e) {}
+  },
+  helpLang() { return this.langSetting === 'auto' ? detectLang() : this.langSetting; },
+  langLabel() { return LANG_NAMES[this.helpLang()]; },
+  // starts from the OS language; once changed, the choice is saved
+  cycleLang(d) {
+    const order = ['en', 'ja', 'ko', 'zh'];
+    const i = order.indexOf(this.helpLang());
+    this.langSetting = order[(i + d + order.length) % order.length];
+    try { localStorage.setItem(LANG_STORE, this.langSetting); } catch (e) {}
+  },
+  open(screen, sel = 0) {
+    this.screen = screen; this.sel = sel; this.slot = 0; this.capture = null;
+    if (screen === 'ranking') Online.openList();
+  },
+  back() {
+    const from = this.screen;
+    if (from === 'keys' || from === 'pad') this.open('settings', from === 'keys' ? 2 : 3);
+    else if (from !== 'title') this.open('title', { settings: 1, ranking: 2, help: 3 }[from] || 0);
+  },
+  isConfig() { return this.screen === 'keys' || this.screen === 'pad'; },
+  // [label, onConfirm, onLeftRight?]
+  items() {
+    switch (this.screen) {
+      case 'title':
+        return [['PLAY', () => Game.startGame()], ['SETTING', () => this.open('settings')],
+          ['RANKING', () => this.open('ranking')], ['HELP', () => this.open('help')]];
+      case 'settings': {
+        const it = [[`SOUND: ${Game.muted ? 'OFF' : 'ON'}`, () => Game.toggleSound(), () => Game.toggleSound()],
+          [`LANGUAGE: ${this.langLabel()}`, () => this.cycleLang(1), d => this.cycleLang(d)]];
+        if (!isMobile) it.push(['KEY CONFIG', () => this.open('keys')], ['CONTROLLER CONFIG', () => this.open('pad')]);
+        it.push(['BACK', () => this.back()]);
+        return it;
+      }
+      case 'keys':
+      case 'pad': {
+        const kind = this.screen === 'keys' ? 'key' : 'pad';
+        const it = ACTIONS.map(([a, label]) => [label, () => { this.capture = { kind, action: a, slot: this.slot }; }]);
+        it.push(['RESET DEFAULT', () => { kind === 'key' ? Controls.resetKeys() : Controls.resetPad(); Controls.save(); }]);
+        it.push(['BACK', () => this.back()]);
+        return it;
+      }
+      default:
+        return [['BACK', () => this.back()]];
+    }
+  },
+  // layout: centre position of each item (ratios) and row height
+  layout(n) {
+    switch (this.screen) {
+      case 'title': return { y0: 0.50, step: 0.09 };
+      case 'settings': return { y0: 0.30, step: Math.min(this.rowStep('[ CONTROLLER CONFIG ]', 21 * CHAR_W * 1.5 * 1.2 * 0.85), 0.6 / (n - 1)) };
+      case 'keys': case 'pad': return { y0: 0.16, step: 80 * this.configUnit() * 1.3 / H };
+      default: return { y0: 0.92, step: 0.08 };
+    }
+  },
+  // row pitch (ratio of H) = glyph height x 1.3, i.e. 0.3 character of space between rows
+  rowStep(sample, widthRatio) {
+    const pxPerUnit = widthRatio * W / unscaledWidth(sample);
+    return 80 * pxPerUnit * 1.3 / H;
+  },
+  // key capture from the keyboard listener; returns true when the key was consumed
+  captureKey(e) {
+    if (!this.capture) return false;
+    e.preventDefault();
+    const c = this.capture;
+    if (c.kind === 'key') {
+      if (e.code === 'Escape' && c.action !== 'pause') this.capture = null;
+      else { Controls.bindKey(c.action, c.slot, e.code); this.capture = null; }
+    } else if (e.code === 'Escape') this.capture = null;
+    return true;
+  },
+  update(click) {
+    T.title.active = this.screen === 'title';
+    const it = this.items();
+    if (this.sel >= it.length) this.sel = it.length - 1;
+    if (this.capture) {
+      if (this.capture.kind === 'pad') {
+        for (let i = 0; i < 18; i++) if (Input.down.has('J' + i)) { Controls.bindPad(this.capture.action, i); this.capture = null; break; }
+      }
+      if (click) this.capture = null;
+      return;
+    }
+    let dv = 0, dh = 0;
+    if (Input.kd('ArrowUp', 'KeyW', 'J12')) dv = -1; else if (Input.kd('ArrowDown', 'KeyS', 'J13')) dv = 1;
+    if (Input.kd('ArrowLeft', 'KeyA', 'J14')) dh = -1; else if (Input.kd('ArrowRight', 'KeyD', 'J15')) dh = 1;
+    const sx = Input.axis(0), sy = Input.axis(1);
+    if (Math.abs(sy) < 0.2) this.neutralV = true; else if (this.neutralV && Math.abs(sy) > 0.6) { this.neutralV = false; dv = sy > 0 ? 1 : -1; }
+    if (Math.abs(sx) < 0.2) this.neutralH = true; else if (this.neutralH && Math.abs(sx) > 0.6) { this.neutralH = false; dh = sx > 0 ? 1 : -1; }
+    if (this.screen === 'ranking' && (dv || dh)) { Online.scrollBy(dv + dh * Online.ROWS); dv = dh = 0; }
+    if (dv) { this.sel = (this.sel + dv + it.length) % it.length; Synth.move(); }
+    if (dh) {
+      if (this.screen === 'keys' && this.sel < ACTIONS.length) { this.slot = 1 - this.slot; Synth.move(); }
+      else if (it[this.sel][2]) { it[this.sel][2](dh); Synth.move(); }
+    }
+    if (Input.kd('Enter', 'NumpadEnter', 'Space', 'J0')) it[this.sel][1]();
+    else if (Input.kd('Escape', 'J1')) this.back();
+    else if (this.screen === 'keys' && this.sel < ACTIONS.length && Input.kd('Delete', 'Backspace')) {
+      Controls.keys[ACTIONS[this.sel][0]][this.slot] = null; Controls.save();
+    }
+    if (click) this.click(click, it);
+  },
+  click(p, it) {
+    const { y0, step } = this.layout(it.length);
+    for (let i = 0; i < it.length; i++) {
+      const cy = (y0 + i * step) * H;
+      if (Math.abs(p.y - cy) > step * H / 2) continue;
+      if (this.isConfig() && i < ACTIONS.length) {
+        const c = this.cols();
+        if (p.x < c.x0 * W || p.x > c.end * W) return;
+        this.sel = i;
+        this.slot = this.screen === 'keys' && p.x >= c.split * W ? 1 : 0;
+      } else {
+        const tw = Math.max(0.3, it[i][0].length * CHAR_W * 1.8) * W;
+        if (Math.abs(p.x - W / 2) > tw / 2) return;
+        this.sel = i;
+      }
+      it[i][1]();
+      return;
+    }
+  },
+  // ---------------- drawing ----------------
+  // maxStep: row pitch (ratio of H); letters are shrunk so they keep 0.3 char of space within it
+  item(ctx, text, x, y, sel, scale = 1, maxStep = 0) {
+    const t = new WireText({ pos: [x, y], float: false });
+    Game.styleMenuItem(t, text, sel);
+    t.widthRatio *= scale;
+    this.fitHeight(t, maxStep ? maxStep / 1.3 : 0);
+    t.draw(ctx, W, H, 0, false);
+  },
+  // shrink a WireText so its glyph height is at most maxH (ratio of H)
+  fitHeight(t, maxH) {
+    if (!maxH) return;
+    const h = 80 * t.widthRatio * W / unscaledWidth(t.text) / H;
+    if (h > maxH) { const k = maxH / h; t.widthRatio *= k; t.lineWidth *= k; }
+  },
+  heading(ctx, text, y) {
+    const t = new WireText({ text, pos: [0.5, y], widthRatio: text.length * CHAR_W * 2.2, lineWidth: 0.03, color: COL.yellow, float: false });
+    this.fitHeight(t, 0.09);
+    t.draw(ctx, W, H, 0, false);
+  },
+  draw(ctx, time) {
+    const it = this.items();
+    const { y0, step } = this.layout(it.length);
+    if (this.screen === 'title') {
+      it.forEach((m, i) => this.item(ctx, m[0], 0.5, y0 + i * step, i === this.sel, 1, step));
+      return;
+    }
+    ctx.fillStyle = this.screen === 'help' ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
+    if (this.screen === 'settings') {
+      this.heading(ctx, 'SETTING', 0.15);
+      it.forEach((m, i) => this.item(ctx, m[0], 0.5, y0 + i * step, i === this.sel, 0.85, step));
+    } else if (this.isConfig()) {
+      this.heading(ctx, this.screen === 'keys' ? 'KEY CONFIG' : 'CONTROLLER CONFIG', 0.07);
+      const blink = Math.floor(performance.now() / 300) % 2 === 0;
+      it.forEach((m, i) => {
+        const y = y0 + i * step, sel = i === this.sel;
+        if (i >= ACTIONS.length) {
+          const t = sel ? `[ ${m[0]} ]` : m[0];
+          new WireText({ text: t, pos: [0.5, y], widthRatio: unscaledWidth(t) * this.configUnit() / W, lineWidth: sel ? 0.022 : 0.016,
+            color: sel ? COL.yellow : MENU_BLUE, float: false }).draw(ctx, W, H, 0, false);
+          return;
+        }
+        const a = ACTIONS[i][0];
+        const c = this.cols();
+        this.label(ctx, m[0], c.x0, y, sel ? COL.yellow : MENU_BLUE);
+        const slots = this.screen === 'keys' ? [0, 1] : [0];
+        slots.forEach(s => {
+          const capturing = this.capture && this.capture.action === a && this.capture.slot === s;
+          let v = this.screen === 'keys' ? Controls.keyLabel(Controls.keys[a][s]) : Controls.padLabel(Controls.pad[a]);
+          if (capturing) v = blink ? (this.screen === 'keys' ? 'PRESS KEY' : 'PRESS BUTTON') : '';
+          const on = sel && s === this.slot;
+          this.label(ctx, on ? `[${v}]` : ` ${v} `, s === 0 ? c.c1 : c.c2, y, on ? COL.yellow : C(0.85, 0.92, 1));
+        });
+      });
+      ctx.font = `${Math.round(clamp(H * 0.028, 12, 20))}px VT323, monospace`;
+      ctx.fillStyle = 'rgb(150,160,170)'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+      ctx.fillText(this.screen === 'keys'
+        ? 'UP/DOWN: SELECT   LEFT/RIGHT: SLOT   ENTER: SET   DEL: CLEAR   ESC: BACK'
+        : 'UP/DOWN: SELECT   A: SET (THEN PRESS A BUTTON)   B: BACK   ESC: CANCEL', W / 2, H - 6);
+    } else if (this.screen === 'ranking') {
+      this.heading(ctx, 'RANKING', 0.07);
+      Online.drawList(ctx);
+      this.item(ctx, 'BACK', 0.5, y0, true, 0.8, 0.1);
+    } else if (this.screen === 'help') {
+      this.heading(ctx, 'HELP', 0.07);
+      this.drawHelp(ctx);
+      this.item(ctx, 'BACK', 0.5, y0, true, 0.8, 0.1);
+    }
+  },
+  // config table columns (ratios of W): label, gap of 3 chars, slot 1, gap, slot 2 — centred as a block
+  // config table: every string is drawn at the same letter size (unit = pixels per font unit),
+  // columns are as wide as their widest entry and separated by about 3 characters
+  configUnit() {
+    const base = 10 * CHAR_W * 0.95 * W / unscaledWidth('MOVE RIGHT');
+    const rows = ACTIONS.length + 2;                         // + RESET DEFAULT, BACK
+    return Math.min(base, 0.76 * H / ((rows - 1) * 80 * 1.3)); // shrink to fit the screen height
+  },
+  cols() {
+    const unit = this.configUnit();
+    const wOf = t => unscaledWidth(t) * unit / W;            // ratio of W
+    const gap = wOf('AAA');
+    const keys = this.screen === 'keys';
+    const labelW = Math.max(...ACTIONS.map(a => wOf(a[1])));
+    const colW = s => Math.max(...ACTIONS.map(([a]) => {
+      if (this.capture && this.capture.action === a && this.capture.slot === s) return wOf(keys ? '[PRESS KEY]' : '[PRESS BUTTON]');
+      return wOf('[' + (keys ? Controls.keyLabel(Controls.keys[a][s]) : Controls.padLabel(Controls.pad[a])) + ']');
+    }));
+    const w1 = colW(0), w2 = keys ? colW(1) : 0;
+    const total = labelW + gap + w1 + (keys ? gap + w2 : 0);
+    const x0 = 0.5 - total / 2;
+    const c1 = x0 + labelW + gap;
+    const c2 = c1 + w1 + gap;
+    return { x0, c1, c2, split: c2 - gap / 2, end: x0 + total };
+  },
+  label(ctx, text, x, y, color) {
+    const unit = this.configUnit();
+    new WireText({ text, pos: [x, y], widthRatio: unscaledWidth(text) * unit / W, lineWidth: 0.016, color, autoCenter: false, float: false })
+      .draw(ctx, W, H, 0, false);
+  },
+
+  drawHelp(ctx) {
+    const lang = this.helpLang();
+    const lines = helpLines(lang, isMobile);
+    const top = 0.14 * H, bottom = 0.86 * H, maxW = Math.min(W * 0.88, 900), x0 = (W - maxW) / 2;
+    const spaced = lang === 'en' || lang === 'ko';
+    const wrap = (text, fs) => {
+      ctx.font = `${fs}px "Hiragino Sans","Noto Sans JP","Malgun Gothic","Noto Sans KR","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif`;
+      const parts = spaced ? text.split(/(\s+)/) : Array.from(text);
+      const out = []; let cur = '';
+      for (const p of parts) {
+        if (ctx.measureText(cur + p).width > maxW && cur.trim()) { out.push(cur.trimEnd()); cur = p.trimStart(); }
+        else cur += p;
+      }
+      out.push(cur);
+      return out;
+    };
+    let fs = Math.round(clamp(H * 0.032, 11, 20)), rows;
+    for (;;) {
+      rows = [];
+      for (const l of lines) {
+        const head = l.startsWith('#');
+        for (const w of wrap(head ? l.slice(1) : l, fs)) rows.push({ t: w, head });
+      }
+      if (rows.length * fs * 1.45 <= bottom - top || fs <= 9) break;
+      fs--;
+    }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    rows.forEach((r, i) => {
+      ctx.font = `${r.head ? 'bold ' : ''}${fs}px "Hiragino Sans","Noto Sans JP","Malgun Gothic","Noto Sans KR","Microsoft YaHei","Noto Sans SC",system-ui,sans-serif`;
+      ctx.fillStyle = r.head ? '#00ff33' : '#d9ebff';
+      ctx.fillText(r.t, x0, top + i * fs * 1.45);
+    });
+  },
+};
+Menu.init();
 
 // ============================================================
 // HUD drawing (2D overlay: wireframe text + OnGUI equivalents)
@@ -1410,22 +2109,26 @@ function drawHUD() {
   // translucent black quads behind pause / game-over menus
   if (Game.paused || Game.over) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, W, H); }
 
-  const list = [T.title, T.next, T.start, T.over, T.pressA, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
+  if (!Game.started) T.title.active = Menu.screen === 'title';
+  const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
   for (const t of list) t.draw(ctx, W, H, time, floatOn);
   if (Game.rankingVisible) { T.rankTitle.draw(ctx, W, H, time, floatOn); rankTexts.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
   if (Game.paused) { T.pauseTitle.draw(ctx, W, H, time, floatOn); pauseItems.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
   if (Game.over) overItems.forEach(t => t.draw(ctx, W, H, time, floatOn));
 
-  // OnGUI
-  if (!Game.started) {
-    ctx.font = '26px VT323, monospace';
-    ctx.fillStyle = 'rgb(128,128,128)';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('Keyboard: Press [Enter] or [Space] to Start', W / 2, H * 0.81 + 45);
-  }
-  if (!Game.started || Game.paused) {
-    const lines = ['CONTROLS', ' - AWSD / D-PAD : SLIDE MOVE', ' - I / K (Y / A) : PITCH ROTATE (U/D)', ' - J / L (X / B) : YAW ROTATE (L/R)',
-      ' - U / O (LB / RB) : ROLL ROTATE (L/R)', ' - SPACE (RT) : FAST FALL', ' - SHIFT/ENTER (ZL) : HARD DROP', ' - LT / C / TAB / E : SWAP NEXT'];
+  if (!Game.started) Menu.draw(ctx, time);
+  // controls panel while paused (PC only), generated from the current bindings
+  if (Game.paused && !isMobile) {
+    const P = a => Controls.padLabel(Controls.pad[a]);
+    const K = a => Controls.keysText(a);
+    const lines = ['CONTROLS',
+      ` - ${K('moveLeft')} ${K('moveRight')} ${K('moveUp')} ${K('moveDown')} : SLIDE MOVE`,
+      ` - ${K('pitchUp')}, ${K('pitchDown')} (${P('pitchUp')}, ${P('pitchDown')}) : PITCH ROTATE`,
+      ` - ${K('yawLeft')}, ${K('yawRight')} (${P('yawLeft')}, ${P('yawRight')}) : YAW ROTATE`,
+      ` - ${K('rollLeft')}, ${K('rollRight')} (${P('rollLeft')}, ${P('rollRight')}) : ROLL ROTATE`,
+      ` - ${K('fastFall')} (${P('fastFall')}) : FAST FALL`,
+      ` - ${K('hardDrop')} (${P('hardDrop')}) : HARD DROP`,
+      ` - ${K('swap')} (${P('swap')}) : SWAP NEXT`];
     ctx.font = '15px VT323, monospace';
     ctx.fillStyle = 'rgb(217,235,255)';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
@@ -1545,7 +2248,7 @@ const AppNav = {
     else if (Input.kd('J1')) this.hide();
   },
   update() {
-    const hide = Game.started;
+    const hide = Game.started || Menu.screen !== 'title';
     if (this.screen.hidden !== hide) {
       if (hide && document.activeElement === this.btn) hudCanvas.focus();
       this.screen.hidden = hide;
@@ -1569,7 +2272,23 @@ function resize() {
 window.addEventListener('resize', resize);
 
 Input.init(hudCanvas);
+hudCanvas.addEventListener('wheel', e => {
+  if (!Game.started && Menu.screen === 'ranking') { e.preventDefault(); Online.scrollBy(Math.sign(e.deltaY) * 3); }
+}, { passive: false });
+{
+  let dragY = null;
+  hudCanvas.addEventListener('pointerdown', e => { dragY = !Game.started && Menu.screen === 'ranking' ? e.clientY : null; });
+  hudCanvas.addEventListener('pointermove', e => {
+    if (dragY === null) return;
+    const rowPx = H * 0.66 / (Online.ROWS - 1);
+    const d = Math.trunc((dragY - e.clientY) / rowPx);
+    if (d) { Online.scrollBy(d); dragY -= d * rowPx; }
+  });
+  const end = () => { dragY = null; };
+  hudCanvas.addEventListener('pointerup', end); hudCanvas.addEventListener('pointercancel', end);
+}
 AppNav.init();
+ScoreUI.init();
 resize();
 Game.init();
 hudCanvas.focus();
@@ -1584,9 +2303,11 @@ function frame(now) {
   Game.time += sdt;
 
   if (AppNav.open) AppNav.pollPad();
+  else if (ScoreUI.open) ScoreUI.pollPad();
   else {
     Game.update(sdt);
-    if (Game.active && !Game.paused && !Game.over && Game.started) Game.active.update(sdt);
+    if (Game.skipBlockFrame) Game.skipBlockFrame = false;
+    else if (Game.active && !Game.paused && !Game.over && Game.started) Game.active.update(sdt);
   }
   AppNav.update();
   Sched.update(sdt);

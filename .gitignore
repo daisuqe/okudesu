@@ -1,0 +1,8 @@
+# 作業用
+.claude/
+_work/
+# wrangler の作業用ファイル
+server/.wrangler/
+server/node_modules/
+# スコアの書き換え対策(公開しない)
+server/protect.js

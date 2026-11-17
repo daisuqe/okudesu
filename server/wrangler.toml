@@ -1,0 +1,12 @@
+name = "okudesu-scores"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "okudesu-scores"
+database_id = "6621b1d5-8b05-4161-9379-3728059891d0"
+
+[vars]
+# ゲームを公開する URL。複数ならカンマ区切り。"*" は誰でも許可。
+ALLOWED_ORIGINS = "https://daisuqe.github.io,http://localhost:8767"
