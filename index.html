@@ -13,7 +13,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #050812; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #050812;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  #scoreName { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
   canvas { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block; }
   #hud { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   #startScreen { position: fixed; inset: 0; pointer-events: none; }
@@ -68,7 +70,7 @@
 <div id="scoreModal" hidden>
   <div id="scorePanel" role="dialog" aria-modal="true" aria-labelledby="scoreTitle">
     <p id="scoreTitle"></p>
-    <input id="scoreName" type="text" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Name">
+    <input id="scoreName" type="text" maxlength="12" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Name">
     <p id="scoreMsg" aria-live="polite"></p>
     <div id="scoreBtns"><button id="scoreB1" type="button"></button><button id="scoreB2" type="button"></button></div>
   </div>
@@ -86,7 +88,7 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineSegmentsGeometry.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineMaterial.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineSegments2.js"></script>
-<script src="okudesu_audio.js?v=202611180108"></script>
-<script src="okudesu.js?v=202611180108"></script>
+<script src="okudesu_audio.js?v=202611180827"></script>
+<script src="okudesu.js?v=202611180827"></script>
 </body>
 </html>

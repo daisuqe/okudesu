@@ -198,7 +198,7 @@ class WireText {
     if (!this.active || !this.text) return;
     const uw = unscaledWidth(this.text);
     if (uw <= 0) return;
-    const s = this.widthRatio * W / uw;           // pixels per font unit
+    const s = Math.min(this.widthRatio * TW, W * 0.92) / uw;   // pixels per font unit (TW: text width basis, larger in portrait); never wider than the screen
     const spacing = CHAR_SPACING * 100 * s;
     let ax = this.pos[0] * W, ay = this.pos[1] * H, sx = 1;
     if (this.float && floatEnabled) {
@@ -209,7 +209,8 @@ class WireText {
     ctx.translate(ax, ay);
     ctx.scale(sx, 1);
     ctx.strokeStyle = css(this.color);
-    ctx.lineWidth = Math.max(0.75, this.lineWidth * LINE_PX * H);
+    // letters scale with the width, so on tall (portrait) screens the line must not keep growing with the height
+    ctx.lineWidth = Math.max(0.75, this.lineWidth * LINE_PX * Math.min(H, TW * 0.75));
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
     let x = this.autoCenter ? -(uw * s) / 2 : 0;
@@ -391,7 +392,9 @@ const Input = {
       if (t) {
         t.x = e.clientX; t.y = e.clientY;
         const dx = t.x - t.sx, dy = t.y - t.sy;
-        if (!t.flicked && Game.flickEnabled() && performance.now() - t.t0 <= this.FLICK_TIME && Math.hypot(dx, dy) >= this.FLICK_DIST) {
+        // touches that start in the centre (camera drag zone) never become flicks
+        if (!t.flicked && Game.flickEnabled() && !Game.isInDragZone(t.sx, t.sy) &&
+            performance.now() - t.t0 <= this.FLICK_TIME && Math.hypot(dx, dy) >= this.FLICK_DIST) {
           t.flicked = true;
           this.flicks.push({ sx: t.sx, sy: t.sy, dx, dy });
           CameraCtl.cancelDrag(e.pointerId);   // a flick must not orbit the camera
@@ -522,6 +525,9 @@ const glCanvas = document.getElementById('gl');
 const hudCanvas = document.getElementById('hud');
 const hud = hudCanvas.getContext('2d');
 let W = window.innerWidth, H = window.innerHeight, DPR = Math.min(window.devicePixelRatio || 1, 2);
+// text width basis: letters are sized from this; on tall portrait screens they get up to 1.6x larger
+let TW = W;
+const textBasis = () => W * (H > W ? Math.min(1.6, Math.max(1, (H / W) * 0.75)) : 1);
 
 const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
 renderer.setClearColor(new THREE.Color(0.02, 0.03, 0.07), 1);
@@ -1203,10 +1209,17 @@ const Game = {
     camera.add(group);
     this.preview = { group, units };
   },
+  // x centre (ratio of W) of the NEXT BLOCK label and preview; kept inside the screen when the text is enlarged (portrait)
+  nextX() {
+    const half = Math.min(T.next.widthRatio * TW, W * 0.92) / 2 / W;
+    return Math.min(0.86, 0.98 - half);
+  },
   updatePreviewTransform() {
     if (!this.preview) return;
     const halfH = 4 * TANH, halfW = halfH * (W / H);
-    this.preview.group.position.set((2 * 0.86 - 1) * halfW, (1 - 2 * 0.08) * halfH - 0.38, -4);
+    const shiftY = (this.viewShift || 0) / H * 2 * halfH;   // portrait: the view is shifted up, keep the preview on screen
+    this.preview.group.scale.setScalar(0.135 * Math.min(1, (W / H) / 0.75));   // narrower screens: smaller preview
+    this.preview.group.position.set((2 * this.nextX() - 1) * halfW, (1 - 2 * 0.08) * halfH - 0.38 - shiftY, -4);
   },
 
   addScore(p) {
@@ -1397,9 +1410,50 @@ const Game = {
       rotDown: R(rx1, y3, rx2 - rx1, y4 - y3),
       space: R(lx2, y3, rx1 - lx2, y4 - y3),
     };
+    this.portrait = H > W;
+    this.viewShift = 0;
+    if (this.portrait) this.layoutPortrait(R);
     this.touchActive = {};
   },
+  // Portrait: two square pads split by an X (left = move, right = pitch/yaw rotate),
+  // below them DROP (fast fall while held) and the two roll buttons. Menu / swap stay in the top corners.
+  layoutPortrait(R) {
+    const m = W * 0.04, gx = W * 0.04;
+    const pad = Math.min((W - 2 * m - gx) / 2, H * 0.26);
+    const bh = Math.min(pad * 0.42, H * 0.09);
+    const rowY = H - Math.max(12, H * 0.025) - bh;
+    const padY = rowY - gx - pad;
+    const lx = W / 2 - gx / 2 - pad, rx = W / 2 + gx / 2;
+    // a triangle of a pad: the quarter of the square on the side `dir`
+    const Tri = (x, y, size, dir) => {
+      const cx = x + size / 2, cy = y + size / 2, half = size / 2;
+      return { tri: true, cx, cy, half, dir, x, y, w: size, h: size, contains(p) {
+        const dx = p.x - cx, dy = p.y - cy;
+        if (Math.abs(dx) > half || Math.abs(dy) > half) return false;
+        if (dir === 'up') return dy < 0 && -dy >= Math.abs(dx);
+        if (dir === 'down') return dy >= 0 && dy >= Math.abs(dx);
+        if (dir === 'left') return dx < 0 && -dx > Math.abs(dy);
+        return dx >= 0 && dx > Math.abs(dy);
+      } };
+    };
+    Object.assign(this.rects, {
+      moveUp: Tri(lx, padY, pad, 'up'), moveDown: Tri(lx, padY, pad, 'down'),
+      moveLeft: Tri(lx, padY, pad, 'left'), moveRight: Tri(lx, padY, pad, 'right'),
+      rotUp: Tri(rx, padY, pad, 'up'), rotDown: Tri(rx, padY, pad, 'down'),
+      rotLeft: Tri(rx, padY, pad, 'left'), rotRight: Tri(rx, padY, pad, 'right'),
+      space: R(lx, rowY, pad, bh),
+      rollLeft: R(rx, rowY, (pad - gx) / 2, bh),
+      rollRight: R(rx + (pad + gx) / 2, rowY, (pad - gx) / 2, bh),
+    });
+    this.padTop = padY;
+    // move the 3D view up so the field sits in the space above the pads
+    this.viewShift = Math.max(0, (H - padY) / 2 - H * 0.04);
+  },
   isInDragZone(x, y) {
+    if (this.portrait) {
+      const p = { x, y };
+      return y < this.padTop - 8 && !this.rects.menu.contains(p) && !this.rects.swap.contains(p);
+    }
     return x >= W * 156 / 422 && x <= W * 265 / 422 && y >= 0 && y <= H * 171 / 226;
   },
   touchAction(name) {
@@ -1665,7 +1719,14 @@ function helpLines(lang, mobile) {
 // ============================================================
 const SCORE_API = 'https://okudesu-scores.haradadaisuke.workers.dev';
 const NAME_STORE = 'OKUDESU_Name', RK_STORE = 'OKUDESU_Rk';
-const cleanPlayerName = v => String(v || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9 ]/g, '').replace(/ {2,}/g, ' ').slice(0, 12);
+// Names: any ordinary characters (letters of any script, digits, punctuation, spaces), up to 12.
+// Control/invisible characters, < >, and emoji are removed. Same rule as the server.
+const cleanPlayerName = v => [...String(v || '').normalize('NFKC')
+  .replace(/[\u0000-\u001f\u007f-\u009f<>\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, '')
+  .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u20E3]/gu, '')
+  .replace(/\s+/g, ' ')].slice(0, 12).join('');
+// true when every character can be drawn with the wireframe font
+const wireDrawable = t => [...String(t)].every(c => c === ' ' || FONT[c.toUpperCase()]);
 const Online = {
   api: (() => { try { return (new URLSearchParams(location.search).get('api') || SCORE_API).replace(/\/+$/, ''); } catch (e) { return SCORE_API; } })(),
   LIST_MS: 60000, CUT_MS: 30 * 60000, BEST_MS: 6 * 3600000, ROWS: 10,
@@ -1713,20 +1774,28 @@ const Online = {
     const step = (bottom - top) / (n - 1);
     const rows = this.list.slice(this.scroll, this.scroll + n);
     const sample = '100  ' + 'M'.repeat(12) + '  9999999';
-    const unit = Math.min(step * H / (1.3 * 80), 0.9 * W / unscaledWidth(sample), 10 * CHAR_W * 1.2 * W / unscaledWidth('MOVE RIGHT'));
+    const unit = Math.min(step * H / (1.3 * 80), 0.9 * W / unscaledWidth(sample), 10 * CHAR_W * 1.2 * TW / unscaledWidth('MOVE RIGHT'));
     const wOf = t => unscaledWidth(t) * unit / W;
     const gap = wOf('AA');
-    const rankW = wOf('100'), nameW = Math.max(wOf('NAME'), ...rows.map(r => wOf(String(r.name)))), scoreW = Math.max(...rows.map(r => wOf(String(r.score))));
+    const glyphH = 80 * unit;   // letter height in px
+    const plainFont = `${Math.round(glyphH * 1.05)}px "Hiragino Sans","Noto Sans JP","Malgun Gothic","Microsoft YaHei",system-ui,sans-serif`;
+    const nameWOf = t => { if (wireDrawable(t)) return wOf(t); ctx.font = plainFont; return ctx.measureText(t).width / W; };
+    const rankW = wOf('100'), nameW = Math.max(wOf('NAME'), ...rows.map(r => nameWOf(String(r.name)))), scoreW = Math.max(...rows.map(r => wOf(String(r.score))));
     const total = rankW + gap + nameW + gap + scoreW, x0 = 0.5 - total / 2;
-    const me = this.playerName().toUpperCase();
-    const put = (text, x, y, color) => new WireText({ text, pos: [x, y], widthRatio: wOf(text), lineWidth: 0.014, color, autoCenter: false, float: false })
+    const me = this.playerName().toLowerCase();
+    const put = (text, x, y, color) => new WireText({ text, pos: [x, y], widthRatio: wOf(text) * W / TW, lineWidth: 0.014, color, autoCenter: false, float: false })
       .draw(ctx, W, H, 0, false);
     rows.forEach((r, i) => {
       const rank = this.scroll + i + 1, y = top + i * step;
-      const color = String(r.name).toUpperCase() === me && me ? COL.yellow : (RANK_COLORS[rank - 1] || C(0, 0.9, 1));
+      const color = String(r.name).toLowerCase() === me && me ? COL.yellow : (RANK_COLORS[rank - 1] || C(0, 0.9, 1));
       const rs = String(rank), ss = String(r.score);
       put(rs, x0 + rankW - wOf(rs), y, color);                       // rank: right-aligned
-      put(String(r.name), x0 + rankW + gap, y, color);
+      const nm = String(r.name);
+      if (wireDrawable(nm)) put(nm, x0 + rankW + gap, y, color);
+      else {   // characters the wire font lacks (e.g. Japanese): normal font
+        ctx.font = plainFont; ctx.fillStyle = css(color); ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText(nm, (x0 + rankW + gap) * W, y * H);
+      }
       put(ss, x0 + total - wOf(ss), y, color);                       // score: right-aligned
     });
     ctx.font = `${Math.round(clamp(H * 0.028, 12, 20))}px VT323, monospace`;
@@ -1744,11 +1813,13 @@ const ScoreUI = {
     this.modal = $('scoreModal'); this.title = $('scoreTitle'); this.input = $('scoreName'); this.msg = $('scoreMsg');
     this.b1 = $('scoreB1'); this.b2 = $('scoreB2');
     if (!this.modal || !this.input || !this.b1 || !this.b2) { this.modal = null; return; }   // old cached index.html: no name entry
-    this.input.addEventListener('input', () => {
+    const tidy = () => {
       const v = cleanPlayerName(this.input.value);
       if (v !== this.input.value) this.input.value = v;
       try { if (v.trim()) localStorage.setItem(NAME_STORE, v.trim()); } catch (e) {}
-    });
+    };
+    this.input.addEventListener('input', e => { if (!e.isComposing) tidy(); });   // leave IME (kana-kanji) input alone until it is committed
+    this.input.addEventListener('compositionend', tidy);
     this.b1.addEventListener('click', () => this.act(1));
     this.b2.addEventListener('click', () => this.act(2));
   },
@@ -1779,7 +1850,7 @@ const ScoreUI = {
     if (this.state === 'entry') {
       if (btn === 2) return this.close();
       const name = cleanPlayerName(this.input.value).trim();
-      if (!name) { this.msg.textContent = 'ENTER A NAME (LETTERS, NUMBERS, SPACES)'; return; }
+      if (!name) { this.msg.textContent = 'ENTER A NAME'; return; }
       try { localStorage.setItem(NAME_STORE, name); } catch (e) {}
       this.show('sending', 'ENTER YOUR NAME', 'SENDING...');
       this.input.hidden = false;
@@ -1789,7 +1860,7 @@ const ScoreUI = {
       if (res.error === 'below_cutoff') return this.show('info', 'GAME OVER', `DID NOT REACH 100TH PLACE (${res.cutoff || 0})`);
       if (!res.ok) {
         const E = { too_many: 'TOO MANY NAMES FROM THIS CONNECTION', too_fast: 'PLEASE WAIT A MOMENT AND TRY AGAIN',
-          bad_name: 'USE LETTERS, NUMBERS AND SPACES ONLY', network: 'COULD NOT REACH THE SERVER' };
+          bad_name: 'THIS NAME CANNOT BE USED', network: 'COULD NOT REACH THE SERVER' };
         this.show('entry', 'ENTER YOUR NAME', E[res.error] || 'COULD NOT SEND THE SCORE');
         return;
       }
@@ -1805,7 +1876,7 @@ const ScoreUI = {
     if (!this.open) return false;
     const c = e.code;
     if (c === 'Escape') { e.preventDefault(); if (this.state !== 'sending') this.close(); }
-    else if ((c === 'Enter' || c === 'NumpadEnter') && document.activeElement === this.input) { e.preventDefault(); this.act(1); }
+    else if ((c === 'Enter' || c === 'NumpadEnter') && document.activeElement === this.input) { if (!e.isComposing && e.keyCode !== 229) { e.preventDefault(); this.act(1); } }
     else if ((c === 'ArrowLeft' || c === 'ArrowRight') && document.activeElement !== this.input && !this.b2.hidden) {
       e.preventDefault(); (document.activeElement === this.b1 ? this.b2 : this.b1).focus();
     }
@@ -1885,7 +1956,7 @@ const Menu = {
   },
   // row pitch (ratio of H) = glyph height x 1.3, i.e. 0.3 character of space between rows
   rowStep(sample, widthRatio) {
-    const pxPerUnit = widthRatio * W / unscaledWidth(sample);
+    const pxPerUnit = widthRatio * TW / unscaledWidth(sample);
     return 80 * pxPerUnit * 1.3 / H;
   },
   // key capture from the keyboard listener; returns true when the key was consumed
@@ -1960,7 +2031,7 @@ const Menu = {
   // shrink a WireText so its glyph height is at most maxH (ratio of H)
   fitHeight(t, maxH) {
     if (!maxH) return;
-    const h = 80 * t.widthRatio * W / unscaledWidth(t.text) / H;
+    const h = 80 * t.widthRatio * TW / unscaledWidth(t.text) / H;
     if (h > maxH) { const k = maxH / h; t.widthRatio *= k; t.lineWidth *= k; }
   },
   heading(ctx, text, y) {
@@ -1986,7 +2057,7 @@ const Menu = {
         const y = y0 + i * step, sel = i === this.sel;
         if (i >= ACTIONS.length) {
           const t = sel ? `[ ${m[0]} ]` : m[0];
-          new WireText({ text: t, pos: [0.5, y], widthRatio: unscaledWidth(t) * this.configUnit() / W, lineWidth: sel ? 0.022 : 0.016,
+          new WireText({ text: t, pos: [0.5, y], widthRatio: unscaledWidth(t) * this.configUnit() / TW, lineWidth: sel ? 0.022 : 0.016,
             color: sel ? COL.yellow : MENU_BLUE, float: false }).draw(ctx, W, H, 0, false);
           return;
         }
@@ -2021,7 +2092,7 @@ const Menu = {
   // config table: every string is drawn at the same letter size (unit = pixels per font unit),
   // columns are as wide as their widest entry and separated by about 3 characters
   configUnit() {
-    const base = 10 * CHAR_W * 0.95 * W / unscaledWidth('MOVE RIGHT');
+    const base = 10 * CHAR_W * 0.95 * TW / unscaledWidth('MOVE RIGHT');
     const rows = ACTIONS.length + 2;                         // + RESET DEFAULT, BACK
     return Math.min(base, 0.76 * H / ((rows - 1) * 80 * 1.3)); // shrink to fit the screen height
   },
@@ -2044,7 +2115,7 @@ const Menu = {
   },
   label(ctx, text, x, y, color) {
     const unit = this.configUnit();
-    new WireText({ text, pos: [x, y], widthRatio: unscaledWidth(text) * unit / W, lineWidth: 0.016, color, autoCenter: false, float: false })
+    new WireText({ text, pos: [x, y], widthRatio: unscaledWidth(text) * unit / TW, lineWidth: 0.016, color, autoCenter: false, float: false })
       .draw(ctx, W, H, 0, false);
   },
 
@@ -2092,11 +2163,13 @@ const isMobile = (() => {
   catch (e) { return false; }
 })();
 
-function roundRect(ctx, x, y, w, h, r) {
-  r = Math.min(r, w / 2, h / 2);
+// rectangle with chamfered (45 degree) corners = octagon
+function octRect(ctx, x, y, w, h, c) {
+  c = Math.min(c, w / 2, h / 2);
   ctx.beginPath();
-  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  ctx.moveTo(x + c, y); ctx.lineTo(x + w - c, y); ctx.lineTo(x + w, y + c); ctx.lineTo(x + w, y + h - c);
+  ctx.lineTo(x + w - c, y + h); ctx.lineTo(x + c, y + h); ctx.lineTo(x, y + h - c); ctx.lineTo(x, y + c);
+  ctx.closePath();
 }
 
 function drawHUD() {
@@ -2110,6 +2183,7 @@ function drawHUD() {
   if (Game.paused || Game.over) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, W, H); }
 
   if (!Game.started) T.title.active = Menu.screen === 'title';
+  T.next.pos[0] = Game.nextX();
   const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
   for (const t of list) t.draw(ctx, W, H, time, floatOn);
   if (Game.rankingVisible) { T.rankTitle.draw(ctx, W, H, time, floatOn); rankTexts.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
@@ -2144,7 +2218,60 @@ function drawHUD() {
   if (isMobile && Game.started && !Game.over && !Game.paused) drawTouchControls(ctx);
 }
 
+function drawPortraitControls(ctx) {
+  const R = Game.rects;
+  const bw = Math.max(2, Math.round(Math.min(W, H) * 0.006));
+  const col = 'rgba(153,191,217,0.45)', fill = 'rgba(153,191,217,0.12)';
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = bw; ctx.strokeStyle = col;
+  // triangles of the two pads (inset toward their centroid so the X shows as a gap)
+  for (const n of ['moveUp', 'moveDown', 'moveLeft', 'moveRight', 'rotUp', 'rotDown', 'rotLeft', 'rotRight']) {
+    const t = R[n], h = t.half, x0 = t.cx - h, x1 = t.cx + h, y0 = t.cy - h, y1 = t.cy + h;
+    const pts = { up: [[x0, y0], [x1, y0], [t.cx, t.cy]], down: [[x0, y1], [x1, y1], [t.cx, t.cy]],
+      left: [[x0, y0], [x0, y1], [t.cx, t.cy]], right: [[x1, y0], [x1, y1], [t.cx, t.cy]] }[t.dir];
+    const gx = (pts[0][0] + pts[1][0] + pts[2][0]) / 3, gy = (pts[0][1] + pts[1][1] + pts[2][1]) / 3;
+    ctx.beginPath();
+    pts.forEach(([px, py], i) => { const x = gx + (px - gx) * 0.84, y = gy + (py - gy) * 0.84; if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath();
+    if (Game.touchActive[n]) { ctx.fillStyle = fill; ctx.fill(); }
+    ctx.stroke();
+  }
+  const box = (n, r) => {
+    const inset = bw;
+    octRect(ctx, r.x + inset, r.y + inset, r.w - inset * 2, r.h - inset * 2, Math.min(r.h * 0.25, 14));
+    if (Game.touchActive[n]) { ctx.fillStyle = fill; ctx.fill(); }
+    ctx.stroke();
+  };
+  // DROP
+  box('space', R.space);
+  new WireText({ text: 'DROP', pos: [(R.space.x + R.space.w / 2) / W, (R.space.y + R.space.h / 2) / H],
+    widthRatio: Math.min(R.space.w * 0.5, R.space.h * 1.9) / TW, lineWidth: 0.02, color: C(0.6, 0.75, 0.85, 0.8), float: false })
+    .draw(ctx, W, H, 0, false);
+  // roll buttons: counter-clockwise (rollLeft) and clockwise (rollRight) arrows
+  for (const [n, cw] of [['rollLeft', false], ['rollRight', true]]) {
+    const r = R[n];
+    box(n, r);
+    // arrow drawn along an octagon: 6 of its 8 sides, starting just past the top, arrowhead at the end
+    const cx = r.x + r.w / 2, cy = r.y + r.h / 2, rad = Math.min(r.w, r.h) * 0.28;
+    const dir = cw ? 1 : -1, step = dir * Math.PI / 4;
+    const a0 = -Math.PI / 2 + dir * Math.PI / 8;              // octagon vertex next to the top
+    const pts = [];
+    for (let i = 0; i <= 6; i++) { const a = a0 + i * step; pts.push([cx + Math.cos(a) * rad, cy + Math.sin(a) * rad]); }
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.stroke();
+    const [ex, ey] = pts[6], [px, py] = pts[5];
+    const len = Math.hypot(ex - px, ey - py), tx = (ex - px) / len, ty = (ey - py) / len;   // direction of travel at the end
+    const ah = rad * 0.55, nx = -ty, ny = tx;
+    ctx.beginPath();
+    ctx.moveTo(ex - tx * ah + nx * ah * 0.6, ey - ty * ah + ny * ah * 0.6);
+    ctx.lineTo(ex, ey);
+    ctx.lineTo(ex - tx * ah - nx * ah * 0.6, ey - ty * ah - ny * ah * 0.6);
+    ctx.stroke();
+  }
+}
+
 function drawTouchControls(ctx) {
+  if (Game.portrait) return drawPortraitControls(ctx);
   const btnSize = (W / 3) * 0.28;
   const bw = Math.max(2, Math.floor(btnSize * 0.025));
   const cr = Math.max(15, Math.floor(btnSize * 0.20));
@@ -2156,7 +2283,7 @@ function drawTouchControls(ctx) {
     const nh = r.h * 0.8, dh = r.h - nh;
     const nw = n === 'space' ? r.w - dh : r.w * 0.8;
     const x = r.x + (r.w - nw) / 2, y = r.y + (r.h - nh) / 2;
-    roundRect(ctx, x + bw / 2, y + bw / 2, nw - bw, nh - bw, cr);
+    octRect(ctx, x + bw / 2, y + bw / 2, nw - bw, nh - bw, cr * 0.7);
     if (Game.touchActive[n]) { ctx.fillStyle = fill; ctx.fill(); }
     ctx.strokeStyle = col; ctx.lineWidth = bw; ctx.stroke();
   }
@@ -2261,13 +2388,16 @@ const AppNav = {
 // ============================================================
 function resize() {
   W = window.innerWidth; H = window.innerHeight; DPR = Math.min(window.devicePixelRatio || 1, 2);
+  TW = textBasis();
   renderer.setPixelRatio(DPR);
   renderer.setSize(W, H, false);
   hudCanvas.width = Math.round(W * DPR); hudCanvas.height = Math.round(H * DPR);
-  camera.aspect = W / H; camera.updateProjectionMatrix();
+  camera.aspect = W / H;
+  Game.recalcRects();
+  if (Game.viewShift) camera.setViewOffset(W, H, 0, Game.viewShift, W, H); else camera.clearViewOffset();
+  camera.updateProjectionMatrix();
   for (const m of lineMats.values()) updateLineMat(m);
   Stars.mat.uniforms.uScale.value = (H * DPR) / (2 * TANH);
-  Game.recalcRects();
 }
 window.addEventListener('resize', resize);
 

@@ -1,13 +1,13 @@
 // OKUDESU ランキング API(Cloudflare Workers + D1)  ※ PartlyRainy のサーバーと同じ方式
 //   GET  /scores  → 上位100人(1人1件)と、100位の点数(cutoff)
 //   POST /scores  → スコアを登録({ name, score, planes, level, blocks, duration })
+// 名前: 普通の文字なら何でも(12文字まで)。
 // 方針: 1人1件(ベストのみ)・上位100人だけを残す。100位以下の記録は保存しない。
 // 不正対策は「簡易なもの」です(ブラウザから送る値は完全には信用できません)。
 // 書き換え対策の細かい中身は、別ファイル protect.js に分けてある(非公開)。
 import { extraValidate, ipLimit, insertStatement } from './protect.js';
 
 const MAX_NAME = 12;               // 名前の最大文字数
-const NAME_RE = /^[A-Za-z0-9 ]+$/; // 名前に使えるのは、アルファベット・数字・スペースだけ
 const MIN_INTERVAL_MS = 15000;     // 同じ端末からの登録間隔の下限
 const MAX_SCORE = 9999999;
 const MAX_LIST = 100;              // ランキングに出す最大の件数(100位まで)
@@ -48,11 +48,14 @@ async function sha256(text) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// 名前: 全角英数を半角に寄せ、連続する空白を1つにし、前後の空白を削る。英数字とスペース以外があれば不可
+// 名前: 普通の文字なら何でもよい(日本語なども可)。全角英数を半角に寄せ、制御文字・見えない文字・< >・絵文字を取り除き、
+// 連続する空白を1つにし、前後の空白を削って 12 文字まで(ゲーム側の cleanPlayerName と同じ規則)
 function cleanName(v) {
-  const s = String(v ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (!s || s.length > MAX_NAME || !NAME_RE.test(s)) return '';
-  return s.toUpperCase();
+  const s = String(v ?? '').normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f-\u009f<>\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u20E3]/gu, '')
+    .replace(/\s+/g, ' ').trim();
+  return [...s].slice(0, MAX_NAME).join('').trim();
 }
 
 const isInt = v => typeof v === 'number' && Number.isInteger(v) && v >= 0;
