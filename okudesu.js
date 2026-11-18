@@ -558,7 +558,9 @@ const hud = hudCanvas.getContext('2d');
 // background layer under the 3D view (the 3D canvas is transparent; the page background is the same dark blue)
 const backCanvas = document.getElementById('back');
 const back = backCanvas ? backCanvas.getContext('2d') : null;
-let W = window.innerWidth, H = window.innerHeight, DPR = Math.min(window.devicePixelRatio || 1, 2);
+// drawing resolution cap: above 1.5x the extra pixels cost a lot of GPU/compositing for little visible gain
+const MAX_DPR = 1.5;
+let W = window.innerWidth, H = window.innerHeight, DPR = Math.min(window.devicePixelRatio || 1, MAX_DPR);
 // text width basis: letters are sized from this; on tall portrait screens they get up to 1.6x larger
 let TW = W;
 // The stage (3D field) is drawn with a fixed vertical view angle, so its on-screen size follows the screen height.
@@ -1265,29 +1267,29 @@ const Game = {
     this.preview = { group, units };
   },
   // x centre (ratio of W) of the NEXT BLOCK label and preview; kept inside the screen when the text is enlarged (portrait)
-  // NEXT BLOCK label centre (ratios of W, H), bottom left; the preview block sits just below the label.
-  // Kept clear of the touch buttons: portrait = above the pads, landscape touch = right of the move buttons.
+  // NEXT BLOCK label centre (ratios of W, H), top right; the preview block sits in a square just below the label.
   // Below the label is a square area (as wide as the label) where the preview block is shown.
   // Returns the label centre (x, y) and the square's centre (cx, cy) and side, all as ratios (x of W, y and side of H).
   nextPos() {
     const labelPx = Math.min(T.next.widthRatio * TW, W * 0.92);
     const half = labelPx / 2 / W;
     const labelHalfH = 40 * labelPx / unscaledWidth(T.next.text) / H;   // half the letter height
-    let left = 0.03, bottom = 0.98;
-    if (isMobile && this.portrait) bottom = (this.padTop - 8) / H;
-    else if (isMobile) { left = 156 / 422 + 0.01; bottom = 171 / 226 - 0.01; }
+    // top right: the label at the top, the square under it
+    const x = 0.98 - half;   // right-aligned to the screen edge (may overlap the layer gauge)
+    const y = Math.max(0.08, labelHalfH + 0.01);
     const side = labelPx / H, gap = 0.01;
-    const cy = bottom - labelHalfH * 2 - side / 2;   // one empty line (as tall as the label) below the square
-    return { x: left + half, y: cy - side / 2 - gap - labelHalfH, cx: left + half, cy, side };
+    const cy = y + labelHalfH + gap + side / 2;
+    return { x, y, cx: x, cy, side };
   },
   nextX() { return this.nextPos().x; },
   updatePreviewTransform() {
     if (!this.preview) return;
-    const halfH = 4 * TANH, halfW = halfH * (W / H);
+    const t = Math.tan(camera.fov / 2 * Math.PI / 180);   // current view angle (wider in portrait)
+    const halfH = 4 * t, halfW = halfH * (W / H);
     const shiftY = (this.viewShift || 0) / H * 2 * halfH;   // portrait: the view is shifted up, keep the preview on screen
     const np = this.nextPos();
     // 1.04x the original size (1.3 x 0.8), but never larger than the square (a block spans up to about 3.5 cells while turning)
-    const fit = np.side * HUD_WORLD_H / 3.5;
+    const fit = np.side * 2 * halfH / 3.5;
     this.preview.group.scale.setScalar(Math.min(0.135 * 1.04 * Math.min(1, (W / H) / 0.75), fit));
     this.preview.group.position.set((2 * np.cx - 1) * halfW, (1 - 2 * np.cy) * halfH - shiftY, -4);
   },
@@ -2204,15 +2206,22 @@ const Menu = {
       out.push(cur);
       return out;
     };
-    let fs = Math.round(clamp(H * 0.032, 11, 20)), rows;
-    for (;;) {
-      rows = [];
-      for (const l of lines) {
-        const head = l.startsWith('#');
-        for (const w of wrap(head ? l.slice(1) : l, fs)) rows.push({ t: w, head });
+    // the wrapped layout only depends on the text and the screen size: compute it once
+    const cacheKey = `${lang}|${isMobile}|${W}|${H}|${lines.join('|')}`;
+    let fs, rows;
+    if (this.helpCache && this.helpCache.key === cacheKey) ({ fs, rows } = this.helpCache);
+    else {
+      fs = Math.round(clamp(H * 0.032, 11, 20));
+      for (;;) {
+        rows = [];
+        for (const l of lines) {
+          const head = l.startsWith('#');
+          for (const w of wrap(head ? l.slice(1) : l, fs)) rows.push({ t: w, head });
+        }
+        if (rows.length * fs * 1.45 <= bottom - top || fs <= 9) break;
+        fs--;
       }
-      if (rows.length * fs * 1.45 <= bottom - top || fs <= 9) break;
-      fs--;
+      this.helpCache = { key: cacheKey, fs, rows };
     }
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     rows.forEach((r, i) => {
@@ -2252,7 +2261,12 @@ function drawHUD() {
   if (Game.paused || Game.over) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, W, H); }
 
   if (!Game.started) T.title.active = Menu.screen === 'title';
-  { const np = Game.nextPos(); T.next.pos[0] = np.x; T.next.pos[1] = np.y; }
+  {
+    const np = Game.nextPos(); T.next.pos[0] = np.x; T.next.pos[1] = np.y;
+    // SCORE / PLANES / LEVEL must not run into NEXT BLOCK
+    const nextLeft = np.x - Math.min(T.next.widthRatio * TW, W * 0.92) / 2 / W;
+    for (const t of [T.score, T.planes, T.level]) t.maxW = Math.max(0.1, nextLeft - t.pos[0] - 0.03);
+  }
   const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp];
   // while paused, the GAME START banner (timed on game time, which is frozen) is hidden so it doesn't cover the menu
   if (!(Game.paused && Game.pauseHelp)) for (const t of list) if (!(Game.paused && t === T.start)) t.draw(ctx, W, H, time, floatOn);
@@ -2295,11 +2309,18 @@ function drawHUD() {
   if (isMobile && Game.started && !Game.over && !Game.paused) drawTouchControls(ctx);
 }
 
+let backKey = '';
 function drawBack() {
   if (!back) return;
+  // the gauge only changes when the stack, the screen size or the visibility changes: skip identical frames
+  const show = Game.started && !Game.over && !(Game.paused && Game.pauseHelp);
+  let key = `${show}|${W}|${H}|${DPR}|${Game.portrait}|${Game.padTop}`;
+  if (show) for (let z = 0; z < GD; z++) { let n = 0; for (let i = z * GW * GH; i < (z + 1) * GW * GH; i++) if (Grid.cells[i]) n++; key += ',' + n; }
+  if (key === backKey) return;
+  backKey = key;
   back.setTransform(DPR, 0, 0, DPR, 0, 0);
   back.clearRect(0, 0, W, H);
-  if (Game.started && !Game.over && !(Game.paused && Game.pauseHelp)) drawLayerGauge(back);
+  if (show) drawLayerGauge(back);
 }
 
 // Layer gauge (right side, drawn on the background layer behind the 3D view): one square per depth layer, deepest at the bottom.
@@ -2309,7 +2330,7 @@ function drawLayerGauge(ctx) {
   const per = GW * GH;
   let right, bottom, top;   // right edge of the column; it may run up behind the NEXT block
   if (isMobile && Game.portrait) { right = W * 0.96; bottom = Game.padTop - 10; top = H * 0.02; }
-  else if (isMobile) { right = W * 265 / 422 - 8; bottom = H * 171 / 226 - 6; top = H * 0.02; }   // just left of the rotate buttons
+  else if (isMobile) { right = W * 0.98; bottom = H * 0.98; top = H * 0.02; }   // right edge, full height (may overlap the touch buttons)
   else { right = W * 0.97; bottom = H - 34; top = H * 0.02; }                                       // above the version label
   const sq = Math.max(6, Math.min(W * 0.1, (bottom - top) / (GD * 1.06)));   // as large as fits, never off screen
   const gap = Math.max(1, sq * 0.06);
@@ -2506,18 +2527,22 @@ const AppNav = {
 // Resize / main loop
 // ============================================================
 function resize() {
-  W = window.innerWidth; H = window.innerHeight; DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight; DPR = Math.min(window.devicePixelRatio || 1, MAX_DPR);
   TW = textBasis();
   renderer.setPixelRatio(DPR);
   renderer.setSize(W, H, false);
   hudCanvas.width = Math.round(W * DPR); hudCanvas.height = Math.round(H * DPR);
   if (backCanvas) { backCanvas.width = hudCanvas.width; backCanvas.height = hudCanvas.height; }
   camera.aspect = W / H;
+  // Portrait: widen the vertical view angle so the nearest frame of the field (4 wide, 5.3 in front of the
+  // camera) just fits the screen width. Landscape keeps the original 43.2 degrees.
+  const frontHalfTan = (GW / 2) * 1.04 / (CameraCtl.center.z - CameraCtl.def.z - (CameraCtl.center.z + 0.5));
+  camera.fov = Math.max(FOV, 2 * Math.atan(frontHalfTan / camera.aspect) * 180 / Math.PI);
   Game.recalcRects();
   if (Game.viewShift) camera.setViewOffset(W, H, 0, Game.viewShift, W, H); else camera.clearViewOffset();
   camera.updateProjectionMatrix();
   for (const m of lineMats.values()) updateLineMat(m);
-  Stars.mat.uniforms.uScale.value = (H * DPR) / (2 * TANH);
+  Stars.mat.uniforms.uScale.value = (H * DPR) / (2 * Math.tan(camera.fov / 2 * Math.PI / 180));
 }
 window.addEventListener('resize', resize);
 
@@ -2544,7 +2569,12 @@ Game.init();
 hudCanvas.focus();
 
 let last = performance.now();
+const FRAME_MS = 1000 / 60;   // cap at 60 fps: high-refresh displays (120/144 Hz) would otherwise do 2x+ the work
+let nextFrameAt = 0;
 function frame(now) {
+  requestAnimationFrame(frame);
+  if (now < nextFrameAt - 1) return;
+  nextFrameAt = Math.max(nextFrameAt + FRAME_MS, now);
   const dt = Math.min(0.1, Math.max(0, (now - last) / 1000));
   last = now;
   Input.poll();
@@ -2573,7 +2603,6 @@ function frame(now) {
   drawBack();
   drawHUD();
   Input.endFrame();
-  requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
