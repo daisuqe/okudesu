@@ -216,7 +216,7 @@ class WireText {
     const shrink = s * uw / (this.widthRatio * TW);            // < 1 when the text was shrunk to fit
     ctx.lineWidth = Math.max(0.75, this.lineWidth * LINE_PX * Math.min(H, TW * 0.75) * shrink);
     ctx.lineCap = 'butt';
-    ctx.lineJoin = 'round';
+    ctx.lineJoin = 'bevel';   // no curves: straight bevel joins
     let x = this.autoCenter ? -(uw * s) / 2 : 0;
     ctx.beginPath();
     for (let i = 0; i < this.text.length; i++) {
@@ -555,6 +555,9 @@ Controls.load();
 const glCanvas = document.getElementById('gl');
 const hudCanvas = document.getElementById('hud');
 const hud = hudCanvas.getContext('2d');
+// background layer under the 3D view (the 3D canvas is transparent; the page background is the same dark blue)
+const backCanvas = document.getElementById('back');
+const back = backCanvas ? backCanvas.getContext('2d') : null;
 let W = window.innerWidth, H = window.innerHeight, DPR = Math.min(window.devicePixelRatio || 1, 2);
 // text width basis: letters are sized from this; on tall portrait screens they get up to 1.6x larger
 let TW = W;
@@ -562,8 +565,8 @@ let TW = W;
 // Text is sized from the same basis (as if the screen were 4:3), so it keeps its size relative to the stage on any screen.
 const textBasis = () => H * 4 / 3;
 
-const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
-renderer.setClearColor(new THREE.Color(0.02, 0.03, 0.07), 1);
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, alpha: true });
+renderer.setClearColor(new THREE.Color(0.02, 0.03, 0.07), back ? 0 : 1);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(FOV, W / H, 0.3, 1000);
 scene.add(camera);
@@ -719,6 +722,40 @@ function updateShards(dt) {
 // ============================================================
 // Grid (GridManager)
 // ============================================================
+// Side walls: each depth layer that holds blocks is tinted on all four walls with that layer's block colour (25%)
+const WallTint = (() => {
+  const x0 = -0.5, x1 = GW - 0.5, y0 = -0.5, y1 = GH - 0.5;
+  const bands = [];
+  for (let z = 0; z < GD; z++) {
+    const za = -(z - 0.5), zb = -(z + 0.5);   // three.js z (Unity z flipped)
+    const quad = (a, b, c, d) => [...a, ...b, ...c, ...a, ...c, ...d];
+    const pos = [
+      ...quad([x0, y0, za], [x0, y1, za], [x0, y1, zb], [x0, y0, zb]),   // left
+      ...quad([x1, y0, za], [x1, y0, zb], [x1, y1, zb], [x1, y1, za]),   // right
+      ...quad([x0, y0, za], [x0, y0, zb], [x1, y0, zb], [x1, y0, za]),   // bottom
+      ...quad([x0, y1, za], [x1, y1, za], [x1, y1, zb], [x0, y1, zb]),   // top
+    ];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const c = lockedColorForZ(z);
+    const m = new THREE.MeshBasicMaterial({ color: toThree(c), transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false });
+    const mesh = new THREE.Mesh(g, m);
+    mesh.visible = false;
+    mesh.renderOrder = -1;
+    scene.add(mesh);
+    bands.push(mesh);
+  }
+  return {
+    update(cells) {
+      for (let z = 0; z < GD; z++) {
+        let any = false;
+        for (let i = z * GW * GH; i < (z + 1) * GW * GH && !any; i++) any = !!cells[i];
+        bands[z].visible = any;
+      }
+    },
+  };
+})();
+
 const Grid = {
   cells: new Array(GW * GH * GD).fill(null),
   timers: [],
@@ -732,6 +769,7 @@ const Grid = {
       if (this.inside(p)) { this.cells[this.idx(p.x, p.y, p.z)] = u; u.lock(); }
       else u.destroy();
     }
+    WallTint.update(this.cells);
   },
   planeFull(z) {
     for (let x = 0; x < GW; x++) for (let y = 0; y < GH; y++) if (!this.cells[this.idx(x, y, z)]) return false;
@@ -754,6 +792,7 @@ const Grid = {
         this.cells[i] = null;
       }
     }
+    WallTint.update(this.cells);
     Sched.add(0.35, () => {
       const cleared = new Set(full);
       const next = new Array(GW * GH * GD).fill(null);
@@ -771,6 +810,7 @@ const Grid = {
         nz--;
       }
       this.cells = next;
+      WallTint.update(this.cells);
       Sched.add(0.08, () => done(full), 'grid');
     }, 'grid');
   },
@@ -779,6 +819,7 @@ const Grid = {
     for (const u of this.cells) if (u) u.destroy();
     for (const u of [...animUnits]) if (u.exploding !== undefined) u.destroy();
     this.cells.fill(null);
+    WallTint.update(this.cells);
   },
 };
 
@@ -1773,7 +1814,7 @@ const cleanPlayerName = v => [...String(v || '').normalize('NFKC')
 const wireDrawable = t => [...String(t)].every(c => c === ' ' || FONT[c.toUpperCase()]);
 const Online = {
   api: (() => { try { return (new URLSearchParams(location.search).get('api') || SCORE_API).replace(/\/+$/, ''); } catch (e) { return SCORE_API; } })(),
-  LIST_MS: 60000, CUT_MS: 30 * 60000, BEST_MS: 6 * 3600000, ROWS: 10,
+  LIST_MS: 60000, CUT_MS: 30 * 60000, ROWS: 10,
   state: 'idle', list: [], scroll: 0, mem_: null,
   mem() {
     if (!this.mem_) { try { this.mem_ = JSON.parse(localStorage.getItem(RK_STORE) || '{}') || {}; } catch (e) { this.mem_ = {}; } }
@@ -1781,7 +1822,16 @@ const Online = {
   },
   set(patch) { Object.assign(this.mem(), patch); try { localStorage.setItem(RK_STORE, JSON.stringify(this.mem_)); } catch (e) {} },
   cutoff() { const m = this.mem(); return m.ct && Date.now() - m.ct < this.CUT_MS ? (m.cutoff || 0) : 0; },
-  best() { const m = this.mem(); return m.bt && Date.now() - m.bt < this.BEST_MS ? (m.best || 0) : 0; },
+  // your own best online record, for the name you use: the best you last registered (kept until it changes)
+  // and your row in the cached ranking list, whichever is higher
+  best() {
+    const name = this.playerName().trim().toLowerCase();
+    if (!name) return 0;
+    const m = this.mem();
+    let b = m.bestName && m.bestName.toLowerCase() === name ? (m.best || 0) : 0;
+    for (const r of m.list || []) if (String(r.name).toLowerCase() === name) b = Math.max(b, r.score);
+    return b;
+  },
   playerName() { try { return localStorage.getItem(NAME_STORE) || ''; } catch (e) { return ''; } },
   async fetchTop(force) {
     const m = this.mem();
@@ -1796,7 +1846,7 @@ const Online = {
     const r = await fetch(this.api + '/scores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, ...data }) });
     const d = await r.json().catch(() => ({}));
     if (d.error === 'below_cutoff') this.set({ cutoff: d.cutoff || 0, ct: Date.now() });
-    else if (r.ok) this.set({ cutoff: d.cutoff || 0, ct: Date.now(), best: d.best, bt: Date.now(), ...(d.updated ? { lt: 0 } : {}) });
+    else if (r.ok) this.set({ cutoff: d.cutoff || 0, ct: Date.now(), best: d.best, bestName: d.name || name, ...(d.updated ? { lt: 0 } : {}) });
     return { ok: r.ok, ...d };
   },
   openList(force = false, focusRank = 0) {
@@ -1867,15 +1917,20 @@ const ScoreUI = {
     this.b1.addEventListener('click', () => this.act(1));
     this.b2.addEventListener('click', () => this.act(2));
   },
-  openFor(data) {
+  // Game over: refresh the ranking briefly (cached for 1 minute), then decide.
+  // Not above your own best / not above 100th place -> just a message, no name entry.
+  async openFor(data) {
     if (!this.modal || !Online.api || data.score <= 0) return;
     this.data = data;
-    const cut = Online.cutoff();
-    if (data.score <= Online.best()) return this.show('info', 'GAME OVER', 'NOT HIGHER THAN YOUR BEST SCORE');
+    try { await Promise.race([Online.fetchTop(false), new Promise((_, ng) => setTimeout(ng, 3000))]); } catch (e) {}
+    if (!Game.over || this.data !== data) return;   // a new game started meanwhile
+    const best = Online.best(), cut = Online.cutoff();
+    if (best > 0 && data.score <= best) return this.show('info', 'GAME OVER', `NOT HIGHER THAN YOUR BEST (${best})`);
     if (cut > 0 && data.score <= cut) return this.show('info', 'GAME OVER', `DID NOT REACH 100TH PLACE (${cut})`);
     this.show('entry', 'ENTER YOUR NAME', '');
   },
   show(state, title, msg) {
+    if (!this.open) this.shownAt = performance.now();
     this.state = state; this.open = true; this.neutral = false;
     Input.held.clear();
     this.title.textContent = title; this.msg.textContent = msg;
@@ -1891,6 +1946,7 @@ const ScoreUI = {
   },
   close() { this.open = false; this.modal.hidden = true; this.state = ''; hudCanvas.focus(); },
   async act(btn) {
+    if (performance.now() - (this.shownAt || 0) < 500) return;   // ignore the key that was still being pressed when the panel appeared
     if (this.state === 'entry') {
       if (btn === 2) return this.close();
       const name = cleanPlayerName(this.input.value).trim();
@@ -1909,7 +1965,7 @@ const ScoreUI = {
         return;
       }
       this.rank = res.rank;
-      this.show('result', `YOU ARE #${res.rank}!`, res.updated ? '' : `YOUR BEST IS ${res.best}`);
+      this.show('result', `YOU ARE #${res.rank}!`, res.updated ? 'NEW BEST!' : `NOT HIGHER THAN YOUR BEST (${res.best})`);
     } else if (this.state === 'result') {
       this.close();
       if (btn === 1) { Game.quitToTitle(); Menu.open('ranking'); Online.openList(true, this.rank); }
@@ -2271,11 +2327,53 @@ function drawHUD() {
   if (isMobile && Game.started && !Game.over && !Game.paused) drawTouchControls(ctx);
 }
 
+function drawBack() {
+  if (!back) return;
+  back.setTransform(DPR, 0, 0, DPR, 0, 0);
+  back.clearRect(0, 0, W, H);
+  if (Game.started && !Game.over && !(Game.paused && Game.pauseHelp)) drawLayerGauge(back);
+}
+
+// Layer gauge (right side, drawn on the background layer behind the 3D view): one square per depth layer, deepest at the bottom.
+// A layer holding blocks is outlined and lightly filled in its colour; when 3 or fewer cells are
+// missing to clear it, that number is written inside in the same colour. Straight lines only.
+function drawLayerGauge(ctx) {
+  const per = GW * GH;
+  let right, bottom, top;   // right edge of the column; it may run up behind the NEXT block
+  if (isMobile && Game.portrait) { right = W * 0.96; bottom = Game.padTop - 10; top = H * 0.02; }
+  else if (isMobile) { right = W * 265 / 422 - 8; bottom = H * 171 / 226 - 6; top = H * 0.02; }   // just left of the rotate buttons
+  else { right = W * 0.97; bottom = H - 34; top = H * 0.02; }                                       // above the version label
+  const sq = Math.max(6, Math.min(W * 0.1, (bottom - top) / (GD * 1.06)));   // as large as fits, never off screen
+  const gap = Math.max(1, sq * 0.06);
+  const x0 = right - sq;
+  const lw = Math.max(1, sq * 0.08);
+  ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
+  for (let z = 0; z < GD; z++) {
+    let n = 0;
+    for (let i = z * per; i < (z + 1) * per; i++) if (Grid.cells[i]) n++;
+    // z = GD-1 (deepest) at the bottom
+    const y = bottom - (GD - z) * (sq + gap) + gap;
+    const c = lockedColorForZ(z);
+    ctx.lineWidth = lw;
+    if (n > 0) {
+      ctx.fillStyle = css({ ...c, a: 0.25 }); ctx.fillRect(x0, y, sq, sq);
+      ctx.strokeStyle = css(c);
+    } else ctx.strokeStyle = 'rgba(153,191,217,0.35)';
+    ctx.strokeRect(x0 + lw / 2, y + lw / 2, sq - lw, sq - lw);
+    const left = per - n;
+    if (n > 0 && left <= 3) {
+      const d = String(left), unit = sq * 0.62 / 80;
+      new WireText({ text: d, pos: [(x0 + sq / 2) / W, (y + sq / 2) / H], widthRatio: unscaledWidth(d) * unit / TW,
+        lineWidth: 0.02, color: c, float: false }).draw(ctx, W, H, 0, false);
+    }
+  }
+}
+
 function drawPortraitControls(ctx) {
   const R = Game.rects;
   const bw = Math.max(2, Math.round(Math.min(W, H) * 0.006));
   const col = 'rgba(153,191,217,0.45)', fill = 'rgba(153,191,217,0.12)';
-  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.lineWidth = bw; ctx.strokeStyle = col;
+  ctx.lineJoin = 'bevel'; ctx.lineCap = 'butt'; ctx.lineWidth = bw; ctx.strokeStyle = col;
   // triangles of the two pads (inset toward their centroid so the X shows as a gap)
   for (const n of ['moveUp', 'moveDown', 'moveLeft', 'moveRight', 'rotUp', 'rotDown', 'rotLeft', 'rotRight']) {
     const t = R[n], h = t.half, x0 = t.cx - h, x1 = t.cx + h, y0 = t.cy - h, y1 = t.cy + h;
@@ -2445,6 +2543,7 @@ function resize() {
   renderer.setPixelRatio(DPR);
   renderer.setSize(W, H, false);
   hudCanvas.width = Math.round(W * DPR); hudCanvas.height = Math.round(H * DPR);
+  if (backCanvas) { backCanvas.width = hudCanvas.width; backCanvas.height = hudCanvas.height; }
   camera.aspect = W / H;
   Game.recalcRects();
   if (Game.viewShift) camera.setViewOffset(W, H, 0, Game.viewShift, W, H); else camera.clearViewOffset();
@@ -2503,6 +2602,7 @@ function frame(now) {
   Synth.update(dt);
 
   renderer.render(scene, camera);
+  drawBack();
   drawHUD();
   Input.endFrame();
   requestAnimationFrame(frame);

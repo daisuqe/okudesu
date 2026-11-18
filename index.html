@@ -17,6 +17,8 @@
     user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
   #scoreName { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
   canvas { position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  /* no rounded corners or curves anywhere (browsers round buttons/inputs by default) */
+  button, input { border-radius: 0; -webkit-appearance: none; appearance: none; }
   #hud { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
   #startScreen { position: fixed; inset: 0; pointer-events: none; }
   #startScreen[hidden] { display: none; }
@@ -30,29 +32,29 @@
   #appsModal { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center;
     padding: 16px; box-sizing: border-box; z-index: 10; }
   #appsModal[hidden] { display: none; }
-  #appsPanel { width: min(380px, 100%); box-sizing: border-box; background: rgba(10,12,17,.9); border: 1px solid #4a5570; border-radius: 10px;
+  #appsPanel { width: min(380px, 100%); box-sizing: border-box; background: rgba(10,12,17,.9); border: 1px solid #4a5570;
     color: #d6dae2; text-align: center; padding: 24px 20px 20px; font-family: system-ui, sans-serif; }
   #appsMsg { white-space: pre-line; margin: 0 0 20px; font-size: 15px; line-height: 1.7; }
   #appsBtns { display: flex; justify-content: center; gap: 16px; }
   #appsBtns button { width: 110px; height: 36px; box-sizing: border-box; background: transparent; color: #00cc33; border: 2px solid #00cc33;
-    border-radius: 4px; font-family: VT323, monospace; font-size: 22px; line-height: 1; cursor: pointer; }
+    font-family: VT323, monospace; font-size: 22px; line-height: 1; cursor: pointer; }
   #appsBtns button:hover { color: #00ff33; border-color: #00ff33; }
   #appsBtns button:focus { outline: none; }
   #appsBtns button:focus-visible, #appsBtns button.sel { color: #050812; background: #00ff33; border-color: #00ff33; }
   #scoreModal { position: fixed; inset: 0; z-index: 9; }
   #scoreModal[hidden] { display: none; }
   #scorePanel { position: absolute; left: 50%; top: 57%; transform: translate(-50%, -50%); width: min(380px, calc(100% - 32px));
-    box-sizing: border-box; background: rgba(10,12,17,.9); border: 1px solid #4a5570; border-radius: 10px; color: #d6dae2;
+    box-sizing: border-box; background: rgba(10,12,17,.9); border: 1px solid #4a5570; color: #d6dae2;
     text-align: center; padding: 18px 20px 18px; font-family: VT323, monospace; }
   #scoreTitle { margin: 0 0 12px; font-size: 26px; color: #00ff33; letter-spacing: 1px; }
   #scoreName { width: 100%; box-sizing: border-box; height: 40px; font-family: VT323, monospace; font-size: 26px; text-align: center;
-    letter-spacing: 2px; background: #050812; color: #ffe600; border: 2px solid #00cc33; border-radius: 4px; outline: none; }
+    letter-spacing: 2px; background: #050812; color: #ffe600; border: 2px solid #00cc33; outline: none; }
   #scoreName:focus { border-color: #00ff33; }
   #scoreName[hidden] { display: none; }
   #scoreMsg { min-height: 1.2em; margin: 10px 0 12px; font-size: 19px; color: #d6dae2; }
   #scoreBtns { display: flex; justify-content: center; gap: 16px; }
   #scoreBtns button { width: 110px; height: 36px; box-sizing: border-box; background: transparent; color: #00cc33; border: 2px solid #00cc33;
-    border-radius: 4px; font-family: VT323, monospace; font-size: 22px; line-height: 1; cursor: pointer; }
+    font-family: VT323, monospace; font-size: 22px; line-height: 1; cursor: pointer; }
   #scoreBtns button[hidden] { display: none; }
   #scoreBtns button:hover { color: #00ff33; border-color: #00ff33; }
   #scoreBtns button:focus { outline: none; }
@@ -62,6 +64,7 @@
 </head>
 
 <body>
+<canvas id="back"></canvas>
 <canvas id="gl"></canvas>
 <canvas id="hud" tabindex="0"></canvas>
 <div id="startScreen">
@@ -88,7 +91,7 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineSegmentsGeometry.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineMaterial.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/lines/LineSegments2.js"></script>
-<script src="okudesu_audio.js?v=202611180839"></script>
-<script src="okudesu.js?v=202611180839"></script>
+<script src="okudesu_audio.js?v=202611180920"></script>
+<script src="okudesu.js?v=202611180920"></script>
 </body>
 </html>
