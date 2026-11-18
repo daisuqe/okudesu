@@ -1124,24 +1124,11 @@ const Stars = (() => {
 })();
 
 // ============================================================
-// Ranking
+// Settings storage
 // ============================================================
-const RANK_KEY = 'OKUDESU_Ranking_Score_', RANK_N = 10;
 const MUTE_KEY = 'OKUDESU_Muted';
-function loadRanking() {
-  const r = [];
-  for (let i = 0; i < RANK_N; i++) {
-    let v = (RANK_N - i) * 1000;
-    try { const s = localStorage.getItem(RANK_KEY + i); if (s !== null && !isNaN(+s)) v = +s; } catch (e) {}
-    r.push(v);
-  }
-  return r;
-}
-function saveRanking(r) { try { r.forEach((v, i) => localStorage.setItem(RANK_KEY + i, String(v))); } catch (e) {} }
-function rankLine(i, score) {
-  const sfx = i === 0 ? 'ST' : i === 1 ? 'ND' : i === 2 ? 'RD' : 'TH';
-  return ((i + 1) + sfx).padEnd(4) + '  ' + String(score).padStart(7);
-}
+// the local (on-device) high-score list was removed; delete what older versions saved
+try { for (let i = 0; i < 10; i++) localStorage.removeItem('OKUDESU_Ranking_Score_' + i); } catch (e) {}
 
 // ============================================================
 // Game (GameManager)
@@ -1158,18 +1145,12 @@ const T = {
   over: new WireText({ text: 'GAME OVER', pos: [0.5, 0.35], widthRatio: 0.46, lineWidth: 0.05, color: C(1, 0.1, 0.1), active: false }),
   notif: new WireText({ text: ' ', pos: [0.5, 0.65], widthRatio: CHAR_W * 1.35, lineWidth: 0.021 * 1.35, color: COL.magenta, active: false }),
   levelUp: new WireText({ text: ' ', pos: [0.5, 0.52], widthRatio: CHAR_W * 2.025, lineWidth: 0.021 * 2.025, color: COL.yellow, active: false }),
-  record: new WireText({ text: ' ', pos: [0.5, 0.425], widthRatio: CHAR_W * 2.025, lineWidth: 0.021 * 2.025, color: COL.yellow, active: false }),
   score: new WireText({ text: 'SCORE 0', pos: [0.04, 0.08], widthRatio: 7 * CHAR_W * 1.2, lineWidth: 0.021 * 1.2, color: C(0, 0.95, 1), autoCenter: false, float: false, active: false }),
   planes: new WireText({ text: 'PLANES 0', pos: [0.04, 0.14], widthRatio: 8 * CHAR_W, lineWidth: 0.021, color: C(1, 0, 1), autoCenter: false, float: false, active: false }),
   level: new WireText({ text: 'LEVEL 1', pos: [0.04, 0.20], widthRatio: 7 * CHAR_W, lineWidth: 0.021, color: C(1, 1, 0), autoCenter: false, float: false, active: false }),
-  rankTitle: new WireText({ text: 'HIGH SCORES', pos: [0.04, 0.30], widthRatio: 0.16, lineWidth: 0.016, color: COL.yellow, autoCenter: false, float: false }),
   pauseTitle: new WireText({ text: 'PAUSED', pos: [0.5, 0.20], widthRatio: 0.149, lineWidth: 0.025, color: COL.yellow }),
 };
 const RANK_COLORS = [C(1, 0.85, 0), C(0.75, 0.75, 0.75), C(0.8, 0.5, 0.2)];
-const rankTexts = [];
-for (let i = 0; i < RANK_N; i++) {
-  rankTexts.push(new WireText({ text: '', pos: [0.04, 0.35 + i * 0.032], widthRatio: 0.128, lineWidth: 0.008, color: RANK_COLORS[i] || C(0, 0.9, 1), autoCenter: false, float: false }));
-}
 const pauseItems = [0, 1, 2, 3, 4].map(i => new WireText({ pos: [0.5, 0.34 + i * 0.075], color: MENU_BLUE, float: false }));
 const overItems = [0, 1].map(i => new WireText({ pos: [0.5, 0.72 + i * 0.12], color: MENU_BLUE, float: false }));
 
@@ -1185,15 +1166,13 @@ const Game = {
   active: null, nextShape: -1, preview: null,
   baseFall: 2.0, speedMul: 0.85, fallInterval: 2.0,
   swapped: false,
-  notifTimer: 0, levelUpTimer: 0, recordTimer: 0,
+  notifTimer: 0, levelUpTimer: 0,
   mega: false, megaTimer: 0,
   muted: false, pauseSel: 0, overSel: 0, pauseNeutral: true,
-  rankingVisible: false, lastRank: -1,
   time: 0,
   rects: {},
 
   init() {
-    this.rebuildRanking();
     try { this.muted = localStorage.getItem(MUTE_KEY) === '1'; } catch (e) {}
     Synth.setMute(this.muted);
   },
@@ -1203,13 +1182,10 @@ const Game = {
     this.blocks = 0; this.playMs = 0;   // sent with the score to the online ranking
     this.skipBlockFrame = true;         // the key that chose PLAY/RETRY must not also act on the first block
     this.over = false; this.paused = false; this.started = true;
-    T.notif.active = T.levelUp.active = T.record.active = false;
-    this.notifTimer = this.levelUpTimer = this.recordTimer = 0;
+    T.notif.active = T.levelUp.active = false;
+    this.notifTimer = this.levelUpTimer = 0;
     this.mega = false;
     this.swapped = false;
-    this.rankingVisible = false;
-    this.lastRank = -1;
-    T.rankTitle.active = true; rankTexts.forEach(t => t.active = true);
     this.fallInterval = this.baseFall;
     Grid.clearAll();
     if (this.active) { this.active.destroy(); this.active = null; }
@@ -1235,7 +1211,7 @@ const Game = {
     this.started = false; this.over = false; this.paused = false;
     for (const k of ['next', 'start', 'over', 'notif', 'levelUp', 'record', 'score', 'planes', 'level']) T[k].active = false;
     T.title.active = true; Menu.open('title');
-    this.rankingVisible = false; this.mega = false;
+    this.mega = false;
     Synth.stopBGM(); Synth.setFastDropping(false);
   },
 
@@ -1289,16 +1265,31 @@ const Game = {
     this.preview = { group, units };
   },
   // x centre (ratio of W) of the NEXT BLOCK label and preview; kept inside the screen when the text is enlarged (portrait)
-  nextX() {
-    const half = Math.min(T.next.widthRatio * TW, W * 0.92) / 2 / W;
-    return Math.min(0.86, 0.98 - half);
+  // NEXT BLOCK label centre (ratios of W, H), bottom left; the preview block sits just below the label.
+  // Kept clear of the touch buttons: portrait = above the pads, landscape touch = right of the move buttons.
+  // Below the label is a square area (as wide as the label) where the preview block is shown.
+  // Returns the label centre (x, y) and the square's centre (cx, cy) and side, all as ratios (x of W, y and side of H).
+  nextPos() {
+    const labelPx = Math.min(T.next.widthRatio * TW, W * 0.92);
+    const half = labelPx / 2 / W;
+    const labelHalfH = 40 * labelPx / unscaledWidth(T.next.text) / H;   // half the letter height
+    let left = 0.03, bottom = 0.98;
+    if (isMobile && this.portrait) bottom = (this.padTop - 8) / H;
+    else if (isMobile) { left = 156 / 422 + 0.01; bottom = 171 / 226 - 0.01; }
+    const side = labelPx / H, gap = 0.01;
+    const cy = bottom - labelHalfH * 2 - side / 2;   // one empty line (as tall as the label) below the square
+    return { x: left + half, y: cy - side / 2 - gap - labelHalfH, cx: left + half, cy, side };
   },
+  nextX() { return this.nextPos().x; },
   updatePreviewTransform() {
     if (!this.preview) return;
     const halfH = 4 * TANH, halfW = halfH * (W / H);
     const shiftY = (this.viewShift || 0) / H * 2 * halfH;   // portrait: the view is shifted up, keep the preview on screen
-    this.preview.group.scale.setScalar(0.135 * Math.min(1, (W / H) / 0.75));   // narrower screens: smaller preview
-    this.preview.group.position.set((2 * this.nextX() - 1) * halfW, (1 - 2 * 0.08) * halfH - 0.38 - shiftY, -4);
+    const np = this.nextPos();
+    // 1.04x the original size (1.3 x 0.8), but never larger than the square (a block spans up to about 3.5 cells while turning)
+    const fit = np.side * HUD_WORLD_H / 3.5;
+    this.preview.group.scale.setScalar(Math.min(0.135 * 1.04 * Math.min(1, (W / H) / 0.75), fit));
+    this.preview.group.position.set((2 * np.cx - 1) * halfW, (1 - 2 * np.cy) * halfH - shiftY, -4);
   },
 
   addScore(p) {
@@ -1374,34 +1365,14 @@ const Game = {
     this.levelUpTimer = dur;
     Object.assign(T.levelUp, { text, color, widthRatio: text.length * CHAR_W * 2.025, lineWidth: 0.021 * 2.025, active: true });
   },
-  recordNotify(text, color, dur) {
-    this.recordTimer = dur;
-    Object.assign(T.record, { text, color, widthRatio: text.length * CHAR_W * 2.025, lineWidth: 0.021 * 2.025, active: true });
-  },
 
   gameOver() {
     this.over = true;
     Synth.playGameOverBGM();
     T.over.active = true;
-    const r = loadRanking();
-    let idx = -1;
-    for (let i = 0; i < RANK_N; i++) if (this.score > r[i]) { idx = i; break; }
-    if (idx !== -1) {
-      for (let i = RANK_N - 1; i > idx; i--) r[i] = r[i - 1];
-      r[idx] = this.score;
-      saveRanking(r);
-      this.recordNotify('NEW RECORD!!!', COL.yellow, 4);
-    }
-    this.lastRank = idx;
-    this.rebuildRanking();
-    this.rankingVisible = true;
     this.overSel = 0;
     this.updateOverMenu();
     ScoreUI.openFor({ score: this.score, planes: this.lines, level: this.level, blocks: this.blocks, duration: Math.round(this.playMs) });
-  },
-  rebuildRanking() {
-    const r = loadRanking();
-    rankTexts.forEach((t, i) => t.text = rankLine(i, r[i]));
   },
 
   togglePause() {
@@ -1622,7 +1593,6 @@ const Game = {
 
     if (this.over) {
       this.handleOverInput();
-      if (this.over && this.lastRank !== -1) rankTexts[this.lastRank].active = Math.floor(this.time * 5) % 2 === 0;
       return;
     }
 
@@ -1636,7 +1606,6 @@ const Game = {
       } else this.updateMega();
     }
     if (this.levelUpTimer > 0) { this.levelUpTimer -= dt; if (this.levelUpTimer <= 0) T.levelUp.active = false; }
-    if (this.recordTimer > 0) { this.recordTimer -= dt; if (this.recordTimer <= 0) T.record.active = false; }
 
     if (this.preview) this.preview.group.rotateOnAxis(new THREE.Vector3(0.3, 1, -0.2).normalize(), 25 * Math.PI / 180 * dt);
   },
@@ -2283,15 +2252,10 @@ function drawHUD() {
   if (Game.paused || Game.over) { ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.fillRect(0, 0, W, H); }
 
   if (!Game.started) T.title.active = Menu.screen === 'title';
-  T.next.pos[0] = Game.nextX();
-  {
-    const nextLeft = T.next.pos[0] - Math.min(T.next.widthRatio * TW, W * 0.92) / 2 / W;
-    for (const t of [T.score, T.planes, T.level]) t.maxW = Math.max(0.1, nextLeft - t.pos[0] - 0.03);
-  }
-  const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp, T.record];
+  { const np = Game.nextPos(); T.next.pos[0] = np.x; T.next.pos[1] = np.y; }
+  const list = [T.title, T.next, T.start, T.over, T.score, T.planes, T.level, T.notif, T.levelUp];
   // while paused, the GAME START banner (timed on game time, which is frozen) is hidden so it doesn't cover the menu
   if (!(Game.paused && Game.pauseHelp)) for (const t of list) if (!(Game.paused && t === T.start)) t.draw(ctx, W, H, time, floatOn);
-  if (Game.rankingVisible) { T.rankTitle.draw(ctx, W, H, time, floatOn); rankTexts.forEach(t => t.draw(ctx, W, H, time, floatOn)); }
   if (Game.paused && Game.pauseHelp) {
     Menu.heading(ctx, 'HELP', 0.07);
     Menu.drawHelp(ctx);
@@ -2315,8 +2279,12 @@ function drawHUD() {
     ctx.font = '15px VT323, monospace';
     ctx.fillStyle = 'rgb(217,235,255)';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-    const y0 = H - 220 - 15 + 10;
-    lines.forEach((l, i) => ctx.fillText(l, 25 + 3, y0 + 3 + i * 22));
+    // bottom centre, below the pause menu (the bottom-left corner holds NEXT BLOCK)
+    const lh = Math.min(22, (H * 0.30) / lines.length);
+    ctx.font = `${Math.round(lh * 0.7)}px VT323, monospace`;
+    const bw = Math.max(...lines.map(l => ctx.measureText(l).width));
+    const x0 = Math.max(8, (W - bw) / 2), y0 = H - 12 - lines.length * lh;
+    lines.forEach((l, i) => ctx.fillText(l, x0, y0 + i * lh));
   }
   if (Game.started) {
     ctx.font = '12px VT323, monospace';
